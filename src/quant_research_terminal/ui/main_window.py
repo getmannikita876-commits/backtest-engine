@@ -48,4 +48,3 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.navigation)
         layout.addWidget(self.pages, 1)
         self.setCentralWidget(root)
-
