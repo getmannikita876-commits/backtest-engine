@@ -1,2 +1,1 @@
 """Desktop user interface."""
-

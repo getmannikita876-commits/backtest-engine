@@ -13,7 +13,9 @@ def test_application_can_be_created() -> None:
 def test_main_window_contains_all_phase_zero_pages() -> None:
     create_application(["quant-research-terminal-test"])
     window = MainWindow()
-    labels = tuple(window.navigation.item(index).text() for index in range(window.navigation.count()))
+    labels = tuple(
+        window.navigation.item(index).text() for index in range(window.navigation.count())
+    )
     assert labels == PAGE_NAMES
     assert window.pages.count() == len(PAGE_NAMES)
     assert window.pages.currentIndex() == 0
