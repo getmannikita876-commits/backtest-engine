@@ -10,14 +10,16 @@ from quant_research_terminal.domain.time import validate_utc_datetime
 
 
 def _coerce_decimal(value: object) -> Decimal:
-    """Coerce decimal-like inputs into Decimal without changing the validated semantics."""
+    """Coerce decimal-like inputs into Decimal without permitting float conversion."""
     if isinstance(value, Decimal):
         return value
-    if isinstance(value, (int, str)):
-        return Decimal(str(value))
-    if isinstance(value, float):
-        return Decimal(str(value))
-    raise TypeError("value must be a decimal-like number")
+    if isinstance(value, bool):
+        raise ValueError("value must be a decimal-like number")
+    if isinstance(value, int):
+        return Decimal(value)
+    if isinstance(value, str):
+        return Decimal(value)
+    raise ValueError("value must be a decimal-like number")
 
 
 PositiveDecimal = Annotated[Decimal, BeforeValidator(_coerce_decimal), Field(gt=0)]
