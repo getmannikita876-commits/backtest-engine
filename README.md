@@ -29,11 +29,18 @@ python -m quant_research_terminal
 ## Verification
 
 ```powershell
-pytest
-ruff check .
-mypy src
+python -m pip install -e ".[dev]"
+python -m pytest
+python -m ruff check .
+python -m mypy src tests
 ```
 
 See `PROJECT_CHARTER.md`, `docs/architecture.md`, `docs/roadmap.md`, and
 `docs/adr/ADR-001-project-foundation.md` for scope and architectural decisions.
+
+## Deliberate limitations
+
+The current foundation intentionally excludes data importers, market-data vendors,
+execution simulation, strategies, options, Monte Carlo, optimization, and prop-firm
+evaluation. Those areas remain future work and are not implemented in this phase.
 

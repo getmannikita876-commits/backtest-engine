@@ -1,5 +1,6 @@
 from datetime import UTC, datetime, timedelta, timezone
 from decimal import Decimal
+from typing import Any, cast
 
 import pytest
 from pydantic import ValidationError
@@ -71,6 +72,27 @@ def test_quote_requires_bid_to_be_less_than_or_equal_to_ask() -> None:
             timestamp=datetime(2024, 1, 2, 12, 0, 0, tzinfo=UTC),
             bid=Decimal("5000.25"),
             ask=Decimal("5000.00"),
+            bid_size=Decimal("1"),
+            ask_size=Decimal("1"),
+        )
+
+
+def test_rejects_float_inputs_for_decimal_fields() -> None:
+    with pytest.raises(ValidationError):
+        Trade(
+            instrument_symbol="ES",
+            timestamp=datetime(2024, 1, 2, 12, 0, 0, tzinfo=UTC),
+            price=cast(Any, 5.25),
+            size=Decimal("2"),
+            side="buy",
+        )
+
+    with pytest.raises(ValidationError):
+        Quote(
+            instrument_symbol="ES",
+            timestamp=datetime(2024, 1, 2, 12, 0, 0, tzinfo=UTC),
+            bid=cast(Any, 1.0),
+            ask=cast(Any, 1.25),
             bid_size=Decimal("1"),
             ask_size=Decimal("1"),
         )

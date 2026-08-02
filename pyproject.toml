@@ -7,8 +7,13 @@ name = "quant-research-terminal"
 version = "0.1.0"
 description = "Local desktop foundation for reproducible quantitative research"
 readme = "README.md"
-requires-python = ">=3.11"
-dependencies = ["PySide6>=6.7,<7", "pydantic>=2.7,<3"]
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "PySide6>=6.7,<7",
+    "pydantic>=2.7,<3",
+    "polars>=1.14,<2",
+    "pyarrow>=16,<18",
+]
 
 [project.optional-dependencies]
 dev = ["pytest>=8.2", "pytest-qt>=4.4", "ruff>=0.5", "mypy>=1.10"]
@@ -22,6 +27,10 @@ packages = ["src/quant_research_terminal"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+markers = [
+    "unit: fast unit tests for domain and storage contracts",
+    "integration: higher-level UI or application integration tests",
+]
 
 [tool.ruff]
 line-length = 100
@@ -31,7 +40,7 @@ target-version = "py311"
 select = ["E", "F", "I", "UP", "B"]
 
 [tool.mypy]
-python_version = "3.11"
+python_version = "3.12"
 strict = true
 packages = ["quant_research_terminal"]
 
