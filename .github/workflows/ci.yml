@@ -8,6 +8,8 @@ on:
 jobs:
   test:
     runs-on: ${{ matrix.os }}
+    env:
+      QT_QPA_PLATFORM: offscreen
     strategy:
       fail-fast: false
       matrix:
@@ -22,6 +24,19 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
+
+      - name: Install Ubuntu system packages
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libegl1 \
+            libgl1 \
+            libegl-mesa0 \
+            libgl1-mesa-dri \
+            libxkbcommon-x11-0 \
+            libxcb-cursor0 \
+            xvfb
 
       - name: Install dependencies
         run: |
@@ -38,4 +53,10 @@ jobs:
         run: python -m mypy src tests
 
       - name: Tests
-        run: python -m pytest
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            python -m pytest
+          else
+            xvfb-run -a -s "-screen 0 1280x1024x24" python -m pytest
+          fi
