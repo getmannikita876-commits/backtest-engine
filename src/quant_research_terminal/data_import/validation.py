@@ -1,0 +1,534 @@
+"""Validation rules for the data-import pipeline.
+
+This module is the single authoritative home for every import validation rule.
+Each validator answers exactly one question about a batch of raw records and
+returns issues; none of them mutate records, raise on bad data, or decide what
+to do about a defect. Deciding — reject the row, keep the first duplicate,
+abort the batch — is policy, and policy belongs to the orchestration layer in
+:mod:`quant_research_terminal.data_import.pipeline`.
+
+============================= =============================================
+Validator                     Question
+============================= =============================================
+:class:`SchemaValidator`      Are the right fields present, and only those?
+:class:`TimestampValidator`   Is every timestamp fixed-offset UTC?
+:class:`ValueValidator`       Are prices, sizes, and OHLC internally sound?
+:class:`DuplicateValidator`   Does any record repeat an earlier identity?
+:class:`OrderingValidator`    Do timestamps advance monotonically?
+============================= =============================================
+
+Each validator reads ``record.record_type`` from the record itself rather than
+being told what to expect, so a validator instance is stateless, reusable, and
+correct for mixed batches.
+
+Validators are independent by construction, but they deliberately stay silent
+where another validator already owns the diagnosis. A record missing its
+timestamp column is reported once by :class:`SchemaValidator`; the timestamp,
+value, duplicate, and ordering validators skip it rather than emitting five
+issues for one defect.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Sequence
+from datetime import datetime
+from decimal import Decimal
+from typing import Final, Protocol, runtime_checkable
+
+from quant_research_terminal.data_import.contracts import (
+    ImportRecordType,
+    ValidationIssue,
+    ValidationIssueCode,
+    ValidationSeverity,
+)
+from quant_research_terminal.data_import.numeric_semantics import is_decimal_like, to_decimal
+from quant_research_terminal.data_import.raw_record import RawRecord
+from quant_research_terminal.data_import.record_fields import TIMESTAMP_FIELD, required_fields
+from quant_research_terminal.data_import.time_semantics import (
+    TimestampStatus,
+    classify_timestamp,
+    status_message,
+)
+
+#: Maps a failing timestamp status onto the issue code reported for it.
+#:
+#: The three failure modes carry distinct codes because they call for different
+#: corrective action: a non-datetime means the source was never parsed, a naive
+#: datetime means the source omitted its offset, and a non-UTC datetime means
+#: the source used a real but wrong zone. Collapsing them would leave an
+#: operator unable to tell a parsing bug from a timezone bug.
+_TIMESTAMP_CODES: Final[dict[TimestampStatus, ValidationIssueCode]] = {
+    TimestampStatus.NOT_DATETIME: ValidationIssueCode.NON_DATETIME_TIMESTAMP,
+    TimestampStatus.NAIVE: ValidationIssueCode.NAIVE_DATETIME,
+    TimestampStatus.NON_UTC: ValidationIssueCode.NON_UTC_TIMESTAMP,
+}
+
+_OHLC_FIELDS: Final[tuple[str, ...]] = ("open", "high", "low", "close", "volume")
+
+#: Quote size fields, validated by the same rule as every other quantity.
+_QUOTE_SIZE_FIELDS: Final[tuple[str, ...]] = ("bid_size", "ask_size")
+
+
+@runtime_checkable
+class RecordBatchValidator(Protocol):
+    """One composable validation rule over a batch of raw records.
+
+    Implementations must be pure and deterministic: the same records in the
+    same order always produce the same issues in the same order.
+    """
+
+    @property
+    def name(self) -> str:
+        """Return a stable identifier used in diagnostics."""
+        ...
+
+    def validate(self, records: Sequence[RawRecord]) -> tuple[ValidationIssue, ...]:
+        """Return every issue this rule finds, in record order."""
+        ...
+
+
+def _issue(
+    *,
+    severity: ValidationSeverity,
+    code: ValidationIssueCode,
+    message: str,
+    row_index: int | None = None,
+    field_name: str | None = None,
+) -> ValidationIssue:
+    return ValidationIssue(
+        severity=severity,
+        code=code,
+        row_index=row_index,
+        field_name=field_name,
+        message=message,
+    )
+
+
+def record_identity(record: RawRecord) -> tuple[object, ...] | None:
+    """Return the value identifying ``record`` for duplicate comparison.
+
+    Identity is the record type plus every required field, so two records are
+    duplicates only when they are indistinguishable in every field the domain
+    models care about.
+
+    This is the one authoritative definition of record identity. Duplicate
+    *detection* and duplicate *policy* live in different layers, and both call
+    this function so they can never disagree about what a duplicate is.
+
+    Returns:
+        The identity tuple, or ``None`` when the record cannot participate in
+        comparison — either because a required field is missing, or because a
+        decoded value is unhashable. Both conditions are reported by other
+        validators, so returning ``None`` here avoids a duplicate diagnosis.
+    """
+    expected = required_fields(record.record_type)
+    if not record.has_fields(expected):
+        return None
+
+    identity = (record.record_type.value, *(record.value(field) for field in expected))
+    try:
+        hash(identity)
+    except TypeError:
+        return None
+    return identity
+
+
+class SchemaValidator:
+    """Checks that each record carries exactly the fields its type requires."""
+
+    def __init__(self, *, strict_fields: bool = True) -> None:
+        """Configure field checking.
+
+        Args:
+            strict_fields: When true, fields beyond the required set are
+                reported. Unknown columns usually mean a source file changed
+                shape, which is worth surfacing before the data is trusted.
+        """
+        self._strict_fields = strict_fields
+
+    @property
+    def name(self) -> str:
+        """Return the validator identifier."""
+        return "schema"
+
+    def validate(self, records: Sequence[RawRecord]) -> tuple[ValidationIssue, ...]:
+        """Report missing required fields and, optionally, unknown fields."""
+        issues: list[ValidationIssue] = []
+        for record in records:
+            expected = required_fields(record.record_type)
+            present = set(record.fields)
+
+            missing = [field for field in expected if field not in present]
+            if missing:
+                issues.append(
+                    _issue(
+                        severity=ValidationSeverity.ERROR,
+                        code=ValidationIssueCode.MISSING_REQUIRED_FIELD,
+                        message=f"missing required fields: {', '.join(missing)}",
+                        row_index=record.source_index,
+                        field_name=missing[0],
+                    )
+                )
+
+            if self._strict_fields:
+                unknown = sorted(present - set(expected))
+                if unknown:
+                    issues.append(
+                        _issue(
+                            severity=ValidationSeverity.ERROR,
+                            code=ValidationIssueCode.UNKNOWN_FIELD,
+                            message=f"unknown fields: {', '.join(unknown)}",
+                            row_index=record.source_index,
+                            field_name=unknown[0],
+                        )
+                    )
+        return tuple(issues)
+
+
+class TimestampValidator:
+    """Checks that every timestamp is a fixed-offset UTC datetime."""
+
+    @property
+    def name(self) -> str:
+        """Return the validator identifier."""
+        return "timestamp"
+
+    def validate(self, records: Sequence[RawRecord]) -> tuple[ValidationIssue, ...]:
+        """Report naive, non-UTC, and non-datetime timestamps."""
+        issues: list[ValidationIssue] = []
+        for record in records:
+            if TIMESTAMP_FIELD not in record.fields:
+                # Absence is the schema validator's diagnosis, not ours.
+                continue
+
+            status = classify_timestamp(record.value(TIMESTAMP_FIELD))
+            if status is TimestampStatus.VALID:
+                continue
+
+            issues.append(
+                _issue(
+                    severity=ValidationSeverity.ERROR,
+                    code=_TIMESTAMP_CODES[status],
+                    message=status_message(status),
+                    row_index=record.source_index,
+                    field_name=TIMESTAMP_FIELD,
+                )
+            )
+        return tuple(issues)
+
+
+class ValueValidator:
+    """Checks that numeric values are exact, positive, and mutually consistent.
+
+    Three questions, by record type: is every numeric field a value that
+    converts to :class:`~decimal.Decimal` without loss, is it positive, and do
+    the fields agree with each other — a quote's bid not above its ask, a bar's
+    open and close inside its high-low range.
+
+    Every quantity — trade size, quote sizes, bar volume — must be **strictly
+    positive**. This mirrors the domain contract exactly: ``Trade.size``,
+    ``Quote.bid_size``, ``Quote.ask_size``, and ``Bar.volume`` are all declared
+    ``PositiveDecimal`` (``Field(gt=0)``), so a zero or negative quantity has
+    no domain representation. Validating it here means such a row is rejected
+    with a diagnosable issue instead of raising a raw model error during
+    normalization.
+
+    A zero-volume bar is therefore not importable, and an empty period must be
+    represented by the absence of a bar rather than by a bar with no volume.
+    That follows the approved Phase 1.1 domain contract; changing it is a
+    domain-layer decision, not an import-layer one.
+
+    At most one issue is reported per record. The checks are ordered from most
+    to least fundamental, and a later check cannot be evaluated meaningfully
+    once an earlier one has failed.
+    """
+
+    @property
+    def name(self) -> str:
+        """Return the validator identifier."""
+        return "value"
+
+    def validate(self, records: Sequence[RawRecord]) -> tuple[ValidationIssue, ...]:
+        """Report the first numeric or consistency defect in each record."""
+        issues: list[ValidationIssue] = []
+        for record in records:
+            if not record.has_fields(required_fields(record.record_type)):
+                # Incomplete records are the schema validator's diagnosis.
+                continue
+
+            issue = self._record_issue(record)
+            if issue is not None:
+                issues.append(issue)
+        return tuple(issues)
+
+    def _record_issue(self, record: RawRecord) -> ValidationIssue | None:
+        if record.record_type is ImportRecordType.TRADE:
+            return self._trade_issue(record)
+        if record.record_type is ImportRecordType.QUOTE:
+            return self._quote_issue(record)
+        return self._bar_issue(record)
+
+    def _trade_issue(self, record: RawRecord) -> ValidationIssue | None:
+        price = record.value("price")
+        if not is_decimal_like(price):
+            return self._value_issue(record, "price must be a Decimal", "price")
+        if to_decimal(price) <= 0:
+            return self._value_issue(record, "price must be positive", "price")
+
+        size = record.value("size")
+        if not is_decimal_like(size):
+            return self._size_issue(record, "size must be a Decimal", "size")
+        if to_decimal(size) <= 0:
+            return self._size_issue(record, "size must be positive", "size")
+        return None
+
+    def _quote_issue(self, record: RawRecord) -> ValidationIssue | None:
+        bid = record.value("bid")
+        ask = record.value("ask")
+        if not is_decimal_like(bid) or not is_decimal_like(ask):
+            return self._value_issue(record, "bid/ask must be Decimal values", "bid")
+
+        bid_value = to_decimal(bid)
+        ask_value = to_decimal(ask)
+        if bid_value <= 0 or ask_value <= 0:
+            return self._value_issue(record, "bid/ask must be positive", "bid")
+        if bid_value > ask_value:
+            return _issue(
+                severity=ValidationSeverity.ERROR,
+                code=ValidationIssueCode.BID_ASK_INVERSION,
+                message="bid must be less than or equal to ask",
+                row_index=record.source_index,
+                field_name="bid",
+            )
+
+        for field_name in _QUOTE_SIZE_FIELDS:
+            size = record.value(field_name)
+            if not is_decimal_like(size):
+                return self._size_issue(record, f"{field_name} must be a Decimal", field_name)
+            if to_decimal(size) <= 0:
+                return self._size_issue(record, f"{field_name} must be positive", field_name)
+        return None
+
+    def _bar_issue(self, record: RawRecord) -> ValidationIssue | None:
+        raw_values = [record.value(field) for field in _OHLC_FIELDS]
+        if not all(is_decimal_like(value) for value in raw_values):
+            return self._value_issue(record, "bar fields must be Decimal values", "open")
+
+        values = [to_decimal(value) for value in raw_values]
+        if any(value <= 0 for value in values):
+            return self._value_issue(record, "bar values must be positive", "open")
+
+        open_value, high, low, close, _volume = values
+        if self._ohlc_inconsistent(open_value=open_value, high=high, low=low, close=close):
+            return _issue(
+                severity=ValidationSeverity.ERROR,
+                code=ValidationIssueCode.INVALID_OHLC,
+                message="OHLC values are inconsistent",
+                row_index=record.source_index,
+                field_name="high",
+            )
+        return None
+
+    @staticmethod
+    def _ohlc_inconsistent(
+        *, open_value: Decimal, high: Decimal, low: Decimal, close: Decimal
+    ) -> bool:
+        return high < low or open_value < low or open_value > high or close < low or close > high
+
+    @staticmethod
+    def _value_issue(record: RawRecord, message: str, field_name: str) -> ValidationIssue:
+        return _issue(
+            severity=ValidationSeverity.ERROR,
+            code=ValidationIssueCode.NON_DECIMAL_PRICE,
+            message=message,
+            row_index=record.source_index,
+            field_name=field_name,
+        )
+
+    @staticmethod
+    def _size_issue(record: RawRecord, message: str, field_name: str) -> ValidationIssue:
+        return _issue(
+            severity=ValidationSeverity.ERROR,
+            code=ValidationIssueCode.NEGATIVE_VALUE,
+            message=message,
+            row_index=record.source_index,
+            field_name=field_name,
+        )
+
+
+class DuplicateValidator:
+    """Detects records that repeat the identity of an earlier record.
+
+    Identity comes from :func:`record_identity`. This validator only *reports*
+    repeats; which copy survives is decided by
+    :class:`~quant_research_terminal.data_import.contracts.DuplicatePolicy` in
+    the orchestration layer.
+    """
+
+    @property
+    def name(self) -> str:
+        """Return the validator identifier."""
+        return "duplicate"
+
+    def validate(self, records: Sequence[RawRecord]) -> tuple[ValidationIssue, ...]:
+        """Report each record whose identity already appeared earlier."""
+        issues: list[ValidationIssue] = []
+        seen: dict[tuple[object, ...], int] = {}
+
+        for record in records:
+            identity = record_identity(record)
+            if identity is None:
+                continue
+
+            first_index = seen.get(identity)
+            if first_index is None:
+                seen[identity] = record.source_index
+                continue
+
+            issues.append(
+                _issue(
+                    severity=ValidationSeverity.WARNING,
+                    code=ValidationIssueCode.DUPLICATE_ROW,
+                    message=f"duplicate of record at source index {first_index}",
+                    row_index=record.source_index,
+                )
+            )
+        return tuple(issues)
+
+
+class OrderingValidator:
+    """Checks that timestamps advance monotonically through the batch.
+
+    Deterministic replay requires a total order over events. Records that move
+    backwards in time break that order and are reported as errors. Records
+    sharing a timestamp are legitimate — several trades can occur in the same
+    microsecond — and are reported only as information, because
+    ``RawRecord.source_index`` supplies a deterministic tiebreak.
+
+    Records without a valid UTC timestamp are skipped: they carry no position
+    on the timeline, and their defect is already reported by
+    :class:`TimestampValidator`.
+    """
+
+    @property
+    def name(self) -> str:
+        """Return the validator identifier."""
+        return "ordering"
+
+    def validate(self, records: Sequence[RawRecord]) -> tuple[ValidationIssue, ...]:
+        """Report descending timestamps and flag equal-timestamp neighbours."""
+        issues: list[ValidationIssue] = []
+        previous: datetime | None = None
+
+        for record in records:
+            value = record.value(TIMESTAMP_FIELD)
+            if classify_timestamp(value) is not TimestampStatus.VALID:
+                continue
+            if not isinstance(value, datetime):
+                continue
+
+            if previous is not None:
+                if value < previous:
+                    issues.append(
+                        _issue(
+                            severity=ValidationSeverity.ERROR,
+                            code=ValidationIssueCode.DESCENDING_TIMESTAMP,
+                            message=(
+                                f"timestamp {value.isoformat()} precedes {previous.isoformat()}"
+                            ),
+                            row_index=record.source_index,
+                            field_name=TIMESTAMP_FIELD,
+                        )
+                    )
+                elif value == previous:
+                    issues.append(
+                        _issue(
+                            severity=ValidationSeverity.INFO,
+                            code=ValidationIssueCode.AMBIGUOUS_TIMESTAMP_ORDER,
+                            message=(
+                                f"timestamp {value.isoformat()} repeats; "
+                                "order resolved by source index"
+                            ),
+                            row_index=record.source_index,
+                            field_name=TIMESTAMP_FIELD,
+                        )
+                    )
+
+            previous = value
+        return tuple(issues)
+
+
+class ValidationPipeline:
+    """Runs a fixed sequence of validators and aggregates their issues.
+
+    The pipeline is intentionally not smart: it does not short-circuit, reorder,
+    or deduplicate. Running every validator over every batch means a single run
+    surfaces all defects at once instead of revealing them one fix at a time,
+    and keeps the output a pure function of the validator sequence.
+    """
+
+    def __init__(self, validators: Sequence[RecordBatchValidator]) -> None:
+        """Compose a pipeline from validators, run in the given order."""
+        self._validators: tuple[RecordBatchValidator, ...] = tuple(validators)
+
+    @property
+    def validators(self) -> tuple[RecordBatchValidator, ...]:
+        """Return the composed validators in execution order."""
+        return self._validators
+
+    def validate(self, records: Sequence[RawRecord]) -> tuple[ValidationIssue, ...]:
+        """Return every issue found, grouped by validator in execution order.
+
+        An empty batch produces a single ``EMPTY_BATCH`` issue and no validator
+        is run, because every rule here is vacuously satisfied by no records
+        and an empty import is far more likely to be a mistake than an intent.
+        """
+        if not records:
+            return (
+                _issue(
+                    severity=ValidationSeverity.ERROR,
+                    code=ValidationIssueCode.EMPTY_BATCH,
+                    message="batch contains no rows",
+                ),
+            )
+
+        issues: list[ValidationIssue] = []
+        for validator in self._validators:
+            issues.extend(validator.validate(records))
+        return tuple(issues)
+
+
+def _core_validators(*, strict_fields: bool) -> tuple[RecordBatchValidator, ...]:
+    """Return the validators every import path shares, in execution order."""
+    return (
+        SchemaValidator(strict_fields=strict_fields),
+        TimestampValidator(),
+        ValueValidator(),
+        DuplicateValidator(),
+    )
+
+
+def default_validation_pipeline(*, strict_fields: bool = True) -> ValidationPipeline:
+    """Build the pipeline for a provider record stream.
+
+    Schema runs first so that later validators can rely on field presence, then
+    timestamps, then values, then duplicates, then ordering. The order affects
+    only the sequence of reported issues, never whether a defect is found.
+
+    Ordering is enforced here because a provider stream is consumed in the
+    order it arrives: nothing downstream will re-sort it, so a record that
+    moves backwards in time is a genuine defect in the source.
+    """
+    return ValidationPipeline((*_core_validators(strict_fields=strict_fields), OrderingValidator()))
+
+
+def batch_validation_pipeline(*, strict_fields: bool = True) -> ValidationPipeline:
+    """Build the pipeline for an eager :class:`ImportBatch`.
+
+    Identical to :func:`default_validation_pipeline` except that ordering is
+    not enforced. The batch API's contract is to *sort* its output into
+    deterministic order rather than to reject unsorted input, so reporting
+    descending timestamps there would flag rows the caller never claimed were
+    ordered. Sorting is applied by the orchestration layer.
+    """
+    return ValidationPipeline(_core_validators(strict_fields=strict_fields))
