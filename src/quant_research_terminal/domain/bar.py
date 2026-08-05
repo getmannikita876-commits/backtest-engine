@@ -4,7 +4,11 @@ from datetime import datetime, timedelta
 
 from pydantic import Field, field_validator, model_validator
 
-from quant_research_terminal.domain.common import PositiveDecimal, _BaseDomainModel
+from quant_research_terminal.domain.common import (
+    PriceDecimal,
+    QuantityDecimal,
+    _BaseDomainModel,
+)
 from quant_research_terminal.domain.time import validate_utc_datetime
 
 _ZERO = timedelta(0)
@@ -48,11 +52,11 @@ class Bar(_BaseDomainModel):
     instrument_symbol: str = Field(min_length=1)
     interval_start: datetime
     interval: timedelta
-    open: PositiveDecimal
-    high: PositiveDecimal
-    low: PositiveDecimal
-    close: PositiveDecimal
-    volume: PositiveDecimal
+    open: PriceDecimal
+    high: PriceDecimal
+    low: PriceDecimal
+    close: PriceDecimal
+    volume: QuantityDecimal
 
     @field_validator("interval_start", mode="before")
     @classmethod

@@ -125,25 +125,37 @@ is a domain-layer decision rather than an import-layer one. If empty periods
 must become representable, revisit `Bar.volume` in the domain package first; the
 import rule follows from it.
 
-Values are exact: finite `Decimal` and `int` are accepted, `bool` and `float`
-are not. Binary floating point cannot represent decimal tick values exactly, so
-admitting a float would corrupt the fixed-point storage encoding downstream.
+Values are judged against the **shared numeric envelope** defined in
+`quant_research_terminal.domain.numeric` and documented in
+`docs/data-contracts.md`. The import layer restates no rule of its own; it asks
+the domain and translates the answer into an issue code. A record that passes
+validation therefore constructs as a domain object whose numeric fields can be
+encoded exactly by storage schema v2 — that is a claim about numeric encoding,
+not about the object having been written to a file.
 
-### Non-finite values are rejected first
+| Violation | Price field | Quantity field |
+| --- | --- | --- |
+| Not a `Decimal`/`int` (float, bool) | `non_decimal_price` | `negative_value` |
+| Zero or negative | `non_decimal_price` | `negative_value` |
+| NaN, sNaN, ±Infinity | `non_finite_value` | `non_finite_value` |
+| Beyond the representable magnitude | `magnitude_exceeded` | `magnitude_exceeded` |
+| Requires removing a non-zero fractional digit past 6 decimal places | `precision_exceeded` | `precision_exceeded` |
+| Not a whole number | — | `non_integer_quantity` |
 
-`NaN`, `sNaN`, `Infinity`, and `-Infinity` are rejected before any other
-numeric rule, with the code `non_finite_value`.
+Bar `volume` is a **quantity**, so it reports quantity codes. It previously
+reported `non_decimal_price`, which misdescribed a count as a price.
 
-The ordering matters. Every other numeric guard — positivity, bid-versus-ask,
-the OHLC range — is a comparison, and comparisons against `NaN` are false while
-comparisons against `sNaN` raise. A non-finite value reaching those checks
-would pass them vacuously or abort the import, so it has to be excluded by
-inspection (`Decimal.is_finite`) rather than by any comparison.
+Fields are examined in a declared order — prices first, then quantities, each
+in its own declared order — so the field named in a diagnostic does not vary
+between runs.
 
-The check covers every numeric field of every record type: trade price and
-size, quote bid, ask, and both sizes, and bar open, high, low, close, and
-volume. Fields are examined in the required-field order rather than by
-iterating a set, so the reported field does not vary between runs.
+### Envelope checks run before relational checks
+
+Every relational rule — bid versus ask, the OHLC range — is an ordering
+comparison, and comparisons against `NaN` are false while comparisons against
+`sNaN` raise. A non-finite value reaching them would pass vacuously or abort
+the import, so the envelope sweep (which detects non-finiteness by inspection,
+not comparison) runs first.
 
 `is_decimal_like` and `to_decimal` both refuse non-finite values, so a stage
 that skipped validation fails loudly instead of propagating a value no

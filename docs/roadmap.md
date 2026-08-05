@@ -162,6 +162,51 @@ marked **experimental and not production-compatible**:
 
 **Real sample files are still required** before this provider can be relied on.
 
+## Phase 1.7 — Data-integrity hardening (in progress)
+
+Closes the defects an independent audit reproduced. No new features.
+
+### 1.7A — critical data integrity
+
+- Trades are no longer deduplicated by attribute equality, which was silently
+  deleting genuine executions and understating volume while reporting success.
+  ADR-003 proposes the trade-identity contract that would restore it soundly.
+- Non-finite decimals (`NaN`, `sNaN`, `±Infinity`) are rejected before any
+  comparison-based guard, which they previously defeated.
+- Delimited files with repeated column names are refused rather than silently
+  collapsing to the last column.
+- Extreme bar intervals became a validation issue instead of an
+  `OverflowError` escaping the import API.
+
+### 1.7B — numeric domain envelope
+
+One envelope, defined in `domain/numeric.py`, shared by domain models, import
+validation, and storage conversion. See ADR-004 (**Accepted**).
+
+- **Invariant established:** every domain object accepted by the numeric
+  envelope has numeric fields that can be encoded exactly by storage schema
+  v2 — no rounding, truncation, overflow, or float coercion. This is a claim
+  about numeric encoding; no Arrow/Parquet IO exists yet, so full object or
+  file persistability is unverified.
+- Separate price and quantity envelopes: maximum exact fractional precision for
+  prices is 6 decimal places (trailing zeros beyond that are accepted; a
+  non-zero digit beyond that is rejected), quantities are whole counts.
+- **Fixed a defect the audit did not find:** the precision rule trapped
+  `Rounded`, which fires on trailing zeros that carry no information, so *every
+  Databento-decoded price failed storage encoding*. The rule now traps
+  `Inexact`.
+- Magnitude is checked before precision, so an enormous value is no longer
+  reported as having too many decimal places.
+- **No schema bump.** The serialized representation is unchanged; version 2
+  files remain valid. Recorded as a clarification of version 2.
+
+Compatibility: the domain is stricter, so fractional quantities and sub-tick
+prices now fail at construction rather than at save time. Bar volume reports
+quantity issue codes rather than `non_decimal_price`.
+
+Still open: signed values (PnL, deltas) have no envelope; fractional quantities
+would need a schema change.
+
 ## Later phases (gated)
 
 Deterministic replay, strategy APIs, execution simulation, experiments, and

@@ -1,7 +1,26 @@
 from __future__ import annotations
 
-from decimal import Decimal
 from typing import Final
+
+from quant_research_terminal.domain.numeric import (
+    MAX_PRICE_FIXED_POINT,
+    MAX_QUANTITY_INTEGER,
+    PRICE_PRECISION,
+    PRICE_QUANTUM,
+    PRICE_SCALE,
+)
+
+__all__ = [
+    "MAX_FIXED_POINT_VALUE",
+    "PRICE_ENCODING",
+    "PRICE_PRECISION",
+    "PRICE_QUANTUM",
+    "PRICE_SCALE",
+    "SCHEMA_NAME",
+    "SCHEMA_VERSION",
+    "TIMESTAMP_TIMEZONE",
+    "UINT64_MAX",
+]
 
 SCHEMA_NAME: Final[str] = "quant_research_terminal.storage"
 
@@ -15,9 +34,10 @@ SCHEMA_NAME: Final[str] = "quant_research_terminal.storage"
 SCHEMA_VERSION: Final[int] = 2
 TIMESTAMP_TIMEZONE: Final[str] = "UTC"
 PRICE_ENCODING: Final[str] = "fixed_scale_decimal"
-PRICE_PRECISION: Final[int] = 18
-PRICE_SCALE: Final[int] = 6
-PRICE_QUANTUM: Final[Decimal] = Decimal("1e-6")
 
-UINT64_MAX: Final[int] = 2**64 - 1
-MAX_FIXED_POINT_VALUE: Final[int] = 10**PRICE_PRECISION - 1
+# PRICE_PRECISION, PRICE_SCALE, and PRICE_QUANTUM are re-exported from the
+# domain package above. The numeric envelope is defined there because the
+# domain may not depend on storage, so schema metadata and storage code read
+# from a single source rather than restating the values.
+UINT64_MAX: Final[int] = MAX_QUANTITY_INTEGER
+MAX_FIXED_POINT_VALUE: Final[int] = MAX_PRICE_FIXED_POINT

@@ -4,8 +4,16 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Annotated
 
-from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, field_validator
+from pydantic import (
+    AfterValidator,
+    BaseModel,
+    BeforeValidator,
+    ConfigDict,
+    Field,
+    field_validator,
+)
 
+from quant_research_terminal.domain.numeric import validate_price, validate_quantity
 from quant_research_terminal.domain.time import validate_utc_datetime
 
 
@@ -22,6 +30,37 @@ def _coerce_decimal(value: object) -> Decimal:
     raise ValueError("value must be a decimal-like number")
 
 
+def _validate_price(value: Decimal) -> Decimal:
+    return validate_price(value)
+
+
+def _validate_quantity(value: Decimal) -> Decimal:
+    return validate_quantity(value)
+
+
+#: A price, constrained to the shared numeric envelope.
+#:
+#: Constructing a model with one of these guarantees the value can be encoded
+#: exactly by storage's fixed-point conversion: finite, strictly positive,
+#: within the representable magnitude, and exactly representable at 6 decimal
+#: places (trailing zeros beyond that excepted). Nothing is rounded to make it
+#: fit. This is a claim about the numeric encoding of the field, not about
+#: whether the containing object has ever been written to a file — no Arrow or
+#: Parquet IO exists yet.
+PriceDecimal = Annotated[Decimal, BeforeValidator(_coerce_decimal), AfterValidator(_validate_price)]
+
+#: A quantity — a size or a volume — constrained to the shared envelope.
+#:
+#: Quantities are counts, so they must additionally be whole numbers within
+#: unsigned 64-bit range. See :mod:`quant_research_terminal.domain.numeric`.
+QuantityDecimal = Annotated[
+    Decimal, BeforeValidator(_coerce_decimal), AfterValidator(_validate_quantity)
+]
+
+#: Retained name for values that only need strict positivity.
+#:
+#: Deprecated in favour of :data:`PriceDecimal` and :data:`QuantityDecimal`,
+#: which additionally guarantee exact storage encodability.
 PositiveDecimal = Annotated[Decimal, BeforeValidator(_coerce_decimal), Field(gt=0)]
 
 

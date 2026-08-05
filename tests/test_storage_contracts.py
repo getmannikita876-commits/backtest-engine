@@ -6,6 +6,7 @@ from decimal import Decimal
 import polars as pl
 import pyarrow as pa  # type: ignore[import-untyped]
 import pytest
+from pydantic import ValidationError
 
 from quant_research_terminal.data import (
     BAR_ARROW_SCHEMA,
@@ -198,71 +199,98 @@ def test_non_utc_datetime_rejection_in_storage_row() -> None:
 
 
 def test_invalid_price_precision_rejection() -> None:
-    quote = Quote(
-        instrument_symbol="ES",
-        timestamp=datetime(2024, 1, 2, 12, 0, 0, tzinfo=UTC),
-        bid=Decimal("5000.0000001"),
-        ask=Decimal("5000.250000"),
-        bid_size=Decimal("1"),
-        ask_size=Decimal("1"),
-    )
-    with pytest.raises(ValueError, match="fractional digits"):
-        quote_to_storage_row(quote)
+    # The envelope is enforced at construction, so an unstorable price never
+    # becomes a domain object in the first place.
+    with pytest.raises(ValidationError, match="decimal places"):
+        Quote(
+            instrument_symbol="ES",
+            timestamp=datetime(2024, 1, 2, 12, 0, 0, tzinfo=UTC),
+            bid=Decimal("5000.0000001"),
+            ask=Decimal("5000.250000"),
+            bid_size=Decimal("1"),
+            ask_size=Decimal("1"),
+        )
+
+    # Storage still enforces it defensively if called directly.
+    with pytest.raises(ValueError, match="decimal places"):
+        _decimal_to_fixed_point(Decimal("5000.0000001"), "bid")
 
 
 def test_reject_price_requiring_rounding() -> None:
+    with pytest.raises(ValidationError, match="decimal places"):
+        Trade(
+            instrument_symbol="ES",
+            timestamp=datetime(2024, 1, 2, 12, 0, 0, tzinfo=UTC),
+            price=Decimal("5000.0000001"),
+            size=Decimal("1"),
+            side=TradeSide.BUY,
+        )
+
+
+def test_trailing_zeros_beyond_the_scale_are_accepted() -> None:
+    # Regression: the previous rule trapped Rounded, which fires whenever any
+    # digit is dropped — including trailing zeros that carry no information.
+    # That rejected every Databento-decoded price, which arrives at scale 9.
     trade = Trade(
         instrument_symbol="ES",
         timestamp=datetime(2024, 1, 2, 12, 0, 0, tzinfo=UTC),
-        price=Decimal("5000.0000001"),
+        price=Decimal("5000.250000000"),
         size=Decimal("1"),
         side=TradeSide.BUY,
     )
-    with pytest.raises(ValueError, match="fractional digits"):
-        trade_to_storage_row(trade)
+
+    row = trade_to_storage_row(trade)
+
+    assert row["price"] == 5_000_250_000
 
 
 def test_reject_price_nan_or_infinity() -> None:
-    with pytest.raises(ValueError, match="finite decimal value"):
-        _decimal_to_fixed_point(Decimal("NaN"), "price")
-    with pytest.raises(ValueError, match="finite decimal value"):
-        _decimal_to_fixed_point(Decimal("Infinity"), "price")
+    for value in ("NaN", "sNaN", "Infinity", "-Infinity"):
+        with pytest.raises(ValueError, match="finite"):
+            _decimal_to_fixed_point(Decimal(value), "price")
 
 
 def test_reject_non_integer_size() -> None:
-    trade = Trade(
-        instrument_symbol="ES",
-        timestamp=datetime(2024, 1, 2, 12, 0, 0, tzinfo=UTC),
-        price=Decimal("5000.000000"),
-        size=Decimal("1.1"),
-        side=TradeSide.BUY,
-    )
+    with pytest.raises(ValidationError, match="whole number"):
+        Trade(
+            instrument_symbol="ES",
+            timestamp=datetime(2024, 1, 2, 12, 0, 0, tzinfo=UTC),
+            price=Decimal("5000.000000"),
+            size=Decimal("1.1"),
+            side=TradeSide.BUY,
+        )
+
     with pytest.raises(ValueError, match="whole number"):
-        trade_to_storage_row(trade)
+        _decimal_to_unsigned_int(Decimal("1.1"), "size")
 
 
 def test_price_fixed_point_overflow_rejection() -> None:
-    trade = Trade(
-        instrument_symbol="ES",
-        timestamp=datetime(2024, 1, 2, 12, 0, 0, tzinfo=UTC),
-        price=Decimal("1000000000000.000000"),
-        size=Decimal("1"),
-        side=TradeSide.BUY,
-    )
-    with pytest.raises(OverflowError, match="exceeds fixed-point precision"):
-        trade_to_storage_row(trade)
+    # Magnitude is reported as magnitude, not as a precision problem.
+    with pytest.raises(ValidationError, match="representable range"):
+        Trade(
+            instrument_symbol="ES",
+            timestamp=datetime(2024, 1, 2, 12, 0, 0, tzinfo=UTC),
+            price=Decimal("1000000000000.000000"),
+            size=Decimal("1"),
+            side=TradeSide.BUY,
+        )
+
+    with pytest.raises(ValueError, match="representable range"):
+        _decimal_to_fixed_point(Decimal("1000000000000.000000"), "price")
 
 
 def test_size_uint64_overflow_rejection() -> None:
-    trade = Trade(
-        instrument_symbol="ES",
-        timestamp=datetime(2024, 1, 2, 12, 0, 0, tzinfo=UTC),
-        price=Decimal("5000.000000"),
-        size=Decimal(str(2**64)),
-        side=TradeSide.BUY,
-    )
-    with pytest.raises(OverflowError, match="unsigned 64-bit integer storage"):
-        trade_to_storage_row(trade)
+    with pytest.raises(ValidationError, match="representable range"):
+        Trade(
+            instrument_symbol="ES",
+            timestamp=datetime(2024, 1, 2, 12, 0, 0, tzinfo=UTC),
+            price=Decimal("5000.000000"),
+            size=Decimal(str(2**64)),
+            side=TradeSide.BUY,
+        )
+
+    with pytest.raises(ValueError, match="representable range"):
+        _decimal_to_unsigned_int(Decimal(str(2**64)), "size")
 
 
 def test_schema_version_rejection() -> None:
@@ -277,10 +305,11 @@ def test_schema_version_rejection() -> None:
 
 
 def test_negative_size_and_volume_rejection() -> None:
-    with pytest.raises(ValueError, match="non-negative"):
-        _decimal_to_unsigned_int(Decimal("-1"), "size")
-    with pytest.raises(ValueError, match="non-negative"):
-        _decimal_to_unsigned_int(Decimal("-1"), "volume")
+    for field_name in ("size", "volume"):
+        with pytest.raises(ValueError, match="strictly positive"):
+            _decimal_to_unsigned_int(Decimal("-1"), field_name)
+        with pytest.raises(ValueError, match="strictly positive"):
+            _decimal_to_unsigned_int(Decimal("0"), field_name)
 
 
 def test_deterministic_field_ordering() -> None:

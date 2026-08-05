@@ -17,10 +17,14 @@ UI -> Application -> Data Import -> Storage -> Domain
   Where an invariant can be made structural it is: a bar's availability time is
   a derived property rather than a stored field, so a bar that would be visible
   before its interval closes cannot be constructed at all. Closed vocabularies
-  are enums (`TradeSide`), not strings.
+  are enums (`TradeSide`), not strings. The **numeric envelope** lives here too
+  (`domain/numeric.py`) and is enforced on construction, so a domain object
+  that exists is a domain object that persists.
 - **Storage** (`data/`) — storage contracts only. Converts domain models into
   deterministic Arrow/Polars-compatible rows with explicit schema metadata and
-  fixed-point decimal encoding. See `docs/data-contracts.md`.
+  fixed-point decimal encoding. It enforces the numeric envelope defensively
+  but does not define one: the scale, bounds, and precision rules are imported
+  from the domain, so the two cannot drift. See `docs/data-contracts.md`.
 - **Data Import** (`data_import/`) — providers, validation, normalization, and
   the orchestration that sequences them. See `docs/data-import.md`.
 - **UI** (`ui/`) — displays data and starts operations; contains no business

@@ -17,6 +17,62 @@ Storage schemas are explicit, stable, and independent of the package version.
 - Non-UTC timezones are rejected explicitly rather than silently normalized.
 - Microsecond precision is preserved.
 
+## The numeric envelope
+
+One definition governs every layer — domain models, import validation, and
+storage conversion. It lives in `quant_research_terminal.domain.numeric`,
+because the domain may not depend on storage and every other layer may depend
+on the domain. See `docs/adr/ADR-004-numeric-domain-envelope.md`.
+
+The invariant it exists to guarantee:
+
+> Every domain object accepted by the numeric envelope has numeric fields that
+> can be encoded exactly by storage schema v2 — as fixed-point integers and
+> unsigned integers — without rounding, truncation, overflow, or coercion
+> through float.
+
+This is a claim about numeric encoding, not about end-to-end file persistence:
+no Arrow or Parquet IO exists yet, so whether a full `Trade`, `Quote`, or `Bar`
+object — or a file of them — can be written and read back is unverified and out
+of scope here. See `docs/adr/ADR-004-numeric-domain-envelope.md`.
+
+Prices and quantities have **separate envelopes**, because a price is a
+fractional decimal on a fixed scale and a quantity is a count:
+
+| | Price | Quantity (size, volume) |
+| --- | --- | --- |
+| Fields | `price`, `bid`, `ask`, `open`, `high`, `low`, `close` | `size`, `bid_size`, `ask_size`, `volume` |
+| Minimum | `0.000001` | `1` |
+| Maximum | `999999999999.999999` | `18446744073709551615` |
+| Scale | maximum exact fractional precision: 6 decimal places | whole numbers only |
+| Finiteness | required | required |
+| Positivity | strictly positive | strictly positive |
+| Storage | `int64`, `value * 10**6` | `uint64` |
+
+Rejecting fractional quantities is a futures-first decision: contracts are
+whole. Fractional units would need a schema change, not a looser validator.
+
+### Maximum exact fractional precision: 6 decimal places
+
+A value is accepted at scale 6 when nothing but trailing zeros would be
+discarded to represent it there:
+
+- `5000.250000000` — **accepted**: nine decimal places, but every digit past
+  the sixth is a trailing zero that can be removed without information loss.
+- `5000.2500001` — **rejected**: representing it at 6 decimal places would
+  require removing a non-zero fractional digit.
+
+Judging by raw digit count instead would reject exactly representable values.
+Vendor decoders that emit fixed-point values commonly produce them — every
+Databento price arrives at scale 9.
+
+### No rounding
+
+A value outside the envelope is **rejected, never adjusted**. Nothing
+quantizes, truncates, or clamps. Magnitude is checked before precision, so an
+enormous value is reported as out of range rather than as having too many
+decimal places.
+
 ## Price encoding
 
 Persisted prices use a documented fixed-point decimal representation:
@@ -72,6 +128,13 @@ The storage package exposes an explicit schema contract:
 | --- | --- |
 | 1 | Initial trade, quote, and bar contracts |
 | 2 | Bars gained `interval_microseconds`; the trade `side` column was constrained to the `TradeSide` vocabulary |
+
+**Version 2 clarification (ADR-004), no bump.** The shared numeric envelope
+narrows what the *domain* accepts; it does not change what storage writes or
+how a written file is read. Column names, types, fixed-point encoding, and
+metadata are unchanged, and every file previously written under version 2
+remains valid — storage never wrote a value outside the envelope, it rejected
+them. Bumping would signal an incompatibility that does not exist.
 
 ### Migration impact for version 2
 
