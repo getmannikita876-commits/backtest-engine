@@ -9,6 +9,7 @@ import pytest
 from quant_research_terminal.data_import import (
     CsvMarketDataProvider,
     DatabentoMarketDataProvider,
+    DatabentoSchema,
     ImportRecordType,
     MarketDataProvider,
     ProviderCapabilities,
@@ -115,9 +116,9 @@ def test_capabilities_report_supported_record_types() -> None:
 
 
 def test_every_provider_satisfies_the_interface(tmp_path: Path) -> None:
-    providers = [
+    providers: list[MarketDataProvider] = [
         _trade_provider(_trade_csv(tmp_path)),
-        DatabentoMarketDataProvider(),
+        DatabentoMarketDataProvider(path=tmp_path / "databento.csv", schema=DatabentoSchema.TRADES),
         ThetaDataMarketDataProvider(),
     ]
 
@@ -328,32 +329,28 @@ def test_header_only_file_yields_no_records(tmp_path: Path) -> None:
 # --------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize(
-    ("provider", "expected_name"),
-    [
-        (DatabentoMarketDataProvider(), "databento"),
-        (ThetaDataMarketDataProvider(), "thetadata"),
-    ],
-)
-def test_vendor_stubs_declare_themselves_unimplemented(
-    provider: DatabentoMarketDataProvider | ThetaDataMarketDataProvider,
-    expected_name: str,
-) -> None:
-    capabilities = provider.capabilities
+def test_thetadata_stub_declares_itself_unimplemented() -> None:
+    capabilities = ThetaDataMarketDataProvider().capabilities
 
-    assert capabilities.provider_name == expected_name
+    assert capabilities.provider_name == "thetadata"
     assert capabilities.is_implemented is False
     assert capabilities.requires_credentials is True
 
 
-@pytest.mark.parametrize(
-    "provider",
-    [DatabentoMarketDataProvider(), ThetaDataMarketDataProvider()],
-)
-def test_vendor_stubs_raise_instead_of_returning_no_data(
-    provider: DatabentoMarketDataProvider | ThetaDataMarketDataProvider,
-) -> None:
+def test_thetadata_stub_raises_instead_of_returning_no_data() -> None:
     # Returning an empty iterator would be indistinguishable from a real vendor
     # legitimately having no data in the window.
     with pytest.raises(ProviderNotConfiguredError, match="interface-only stub"):
-        list(provider.fetch(_trade_request()))
+        list(ThetaDataMarketDataProvider().fetch(_trade_request()))
+
+
+def test_databento_is_no_longer_a_stub(tmp_path: Path) -> None:
+    # Phase 1.4 replaced the Databento stub with a real decoder. It reads
+    # archived exports, so it needs no credentials of its own.
+    capabilities = DatabentoMarketDataProvider(
+        path=tmp_path / "databento.csv", schema=DatabentoSchema.TRADES
+    ).capabilities
+
+    assert capabilities.provider_name == "databento"
+    assert capabilities.is_implemented is True
+    assert capabilities.requires_credentials is False

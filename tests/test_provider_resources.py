@@ -17,7 +17,6 @@ import pytest
 
 from quant_research_terminal.data_import import (
     CsvMarketDataProvider,
-    DatabentoMarketDataProvider,
     ImportRecordType,
     MarketDataProvider,
     ProviderDecodeError,
@@ -323,15 +322,11 @@ def test_stream_closed_before_iteration_opens_no_handle(tmp_path: Path, spy: _Ha
     assert list(stream) == []
 
 
-@pytest.mark.parametrize(
-    "provider",
-    [DatabentoMarketDataProvider(), ThetaDataMarketDataProvider()],
-)
-def test_stub_providers_raise_before_returning_a_stream(
-    provider: MarketDataProvider,
-) -> None:
+def test_stub_providers_raise_before_returning_a_stream() -> None:
     # The stream contract must not paper over an unimplemented vendor by
     # handing back an empty, already-closed stream.
+    provider: MarketDataProvider = ThetaDataMarketDataProvider()
+
     with pytest.raises(ProviderNotConfiguredError):
         provider.fetch(_request())
 
