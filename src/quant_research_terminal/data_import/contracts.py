@@ -59,6 +59,8 @@ class ValidationIssueCode(StrEnum):
     NON_UTC_TIMESTAMP = "non_utc_timestamp"
     NEGATIVE_VALUE = "negative_value"
     NON_DECIMAL_PRICE = "non_decimal_price"
+    NON_FINITE_VALUE = "non_finite_value"
+    INTERVAL_OUT_OF_RANGE = "interval_out_of_range"
     BID_ASK_INVERSION = "bid_ask_inversion"
     INVALID_OHLC = "invalid_ohlc"
     INVALID_BAR_INTERVAL = "invalid_bar_interval"

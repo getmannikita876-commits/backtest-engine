@@ -72,6 +72,20 @@ class Bar(_BaseDomainModel):
         return value
 
     @model_validator(mode="after")
+    def validate_interval_is_representable(self) -> Bar:
+        # availability_time is derived, so a bar whose interval pushes it past
+        # the representable datetime range would construct successfully and
+        # then raise whenever its timestamp was read — including from inside
+        # replay ordering. Rejecting it here keeps the property total.
+        try:
+            self.interval_start + self.interval
+        except OverflowError as exc:
+            raise ValueError(
+                "interval_start + interval leaves the representable datetime range"
+            ) from exc
+        return self
+
+    @model_validator(mode="after")
     def validate_ohlc(self) -> Bar:
         # Preserve bar integrity by ensuring the range and OHLC values are internally consistent.
         if self.high < self.low:

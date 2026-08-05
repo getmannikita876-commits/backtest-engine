@@ -68,9 +68,13 @@ def test_rejects_naive_datetime() -> None:
 
 
 def test_rejects_duplicate_rows_by_default() -> None:
+    # Quotes, not trades: a quote is a state observation, so two identical
+    # snapshots carry the same information. Trades are countable events with no
+    # attribute-based identity and are never deduplicated — see
+    # tests/test_data_integrity_regressions.py and ADR-003.
     batch = ImportBatch(
-        record_type=ImportRecordType.TRADE,
-        rows=(_trade_row(), _trade_row()),
+        record_type=ImportRecordType.QUOTE,
+        rows=(_quote_row(), _quote_row()),
     )
 
     accepted, report = validate_import_batch(batch)
@@ -162,8 +166,8 @@ def test_rejects_schema_version_mismatch() -> None:
 
 def test_keep_first_duplicate_policy() -> None:
     batch = ImportBatch(
-        record_type=ImportRecordType.TRADE,
-        rows=(_trade_row(), _trade_row()),
+        record_type=ImportRecordType.QUOTE,
+        rows=(_quote_row(), _quote_row()),
         duplicate_policy=DuplicatePolicy.KEEP_FIRST,
     )
 
@@ -176,8 +180,8 @@ def test_keep_first_duplicate_policy() -> None:
 
 def test_keep_last_duplicate_policy() -> None:
     batch = ImportBatch(
-        record_type=ImportRecordType.TRADE,
-        rows=(_trade_row(), _trade_row()),
+        record_type=ImportRecordType.QUOTE,
+        rows=(_quote_row(), _quote_row()),
         duplicate_policy=DuplicatePolicy.KEEP_LAST,
     )
 

@@ -125,16 +125,70 @@ is a domain-layer decision rather than an import-layer one. If empty periods
 must become representable, revisit `Bar.volume` in the domain package first; the
 import rule follows from it.
 
-Values are exact: `Decimal` and `int` are accepted, `bool` and `float` are not.
-Binary floating point cannot represent decimal tick values exactly, so admitting
-a float would corrupt the fixed-point storage encoding downstream.
+Values are exact: finite `Decimal` and `int` are accepted, `bool` and `float`
+are not. Binary floating point cannot represent decimal tick values exactly, so
+admitting a float would corrupt the fixed-point storage encoding downstream.
+
+### Non-finite values are rejected first
+
+`NaN`, `sNaN`, `Infinity`, and `-Infinity` are rejected before any other
+numeric rule, with the code `non_finite_value`.
+
+The ordering matters. Every other numeric guard — positivity, bid-versus-ask,
+the OHLC range — is a comparison, and comparisons against `NaN` are false while
+comparisons against `sNaN` raise. A non-finite value reaching those checks
+would pass them vacuously or abort the import, so it has to be excluded by
+inspection (`Decimal.is_finite`) rather than by any comparison.
+
+The check covers every numeric field of every record type: trade price and
+size, quote bid, ask, and both sizes, and bar open, high, low, close, and
+volume. Fields are examined in the required-field order rather than by
+iterating a set, so the reported field does not vary between runs.
+
+`is_decimal_like` and `to_decimal` both refuse non-finite values, so a stage
+that skipped validation fails loudly instead of propagating a value no
+comparison can order.
 
 ## Duplicate handling (approved)
 
-Identity is the record type plus every required field, so two records are
-duplicates only when indistinguishable in every field the domain models care
-about. `record_identity` is the single definition, used by both detection and
-policy.
+### Trades are never deduplicated (interim policy)
+
+**Exact attribute-based duplicate removal does not apply to trades.** A trade is
+a countable event, and two genuinely distinct executions can agree on
+timestamp, instrument, price, size, and side — one-lot fills at the same price
+inside the same microsecond are ordinary in real tick data. The domain carries
+no venue, sequence number, or trade identifier that could tell them apart, so
+attribute equality is not evidence of duplication.
+
+`record_identity` returns `None` for trades, so no `DuplicatePolicy` — not
+`REJECT`, `KEEP_FIRST`, or `KEEP_LAST` — can discard one.
+
+A genuinely repeated trade from a defective source is therefore imported twice.
+That is the deliberate direction: **over-counting is preferred to silent
+deletion**, because a duplicated execution is visible and correctable while a
+deleted one is neither. Trade de-duplication is the operator's responsibility
+until an identity contract exists.
+
+This is interim. ADR-003 proposes the trade-identity contract that would let
+duplicate detection be restored on a sound basis.
+
+### Quotes and bars still deduplicate
+
+The reasoning does not carry across record types:
+
+- A **quote** is a *state observation*. Two identical top-of-book snapshots for
+  one instant assert the same fact, so collapsing them loses no information.
+- A **bar** is a *summary keyed by its period*. Two identical bars covering one
+  interval are the same bar, and retaining one preserves its volume exactly.
+
+For these, identity is the record type plus every required field, so two
+records are duplicates only when indistinguishable in every field the domain
+models care about. `record_identity` is the single definition, used by both
+detection and policy.
+
+A discarded copy is always countable from the report: `total_rows` minus
+`accepted_rows` includes it, `warning_count` records it, and the issue message
+states that a copy will be discarded.
 
 Detection and policy are separate. The validator only **reports** a repeat as a
 `WARNING`; `ImportBatch.duplicate_policy` decides which copy survives.
@@ -170,6 +224,30 @@ so a bar must never be seen before the ticks composing it.
 
 The key is total: two records can compare equal only if they share a source
 position, which is impossible by construction.
+
+## Delimited file structure (approved)
+
+Shared by every file-backed provider. These are *structural* defects: they make
+the row-to-column mapping ambiguous, so no per-row diagnosis is meaningful and
+the read fails with `ProviderDecodeError` rather than producing records.
+
+| Defect | Behaviour |
+| --- | --- |
+| No header row | Rejected |
+| **Repeated column name** | **Rejected, naming the duplicated columns** |
+| Data row whose column count disagrees with the header | Rejected |
+
+Column names are matched **literally and case-sensitively**, so `price` and
+`Price` are distinct columns rather than a duplicate pair, and a byte-order
+mark makes the first column's name distinct rather than repeated.
+
+The duplicate-column rule exists because rows are matched to columns by name. A
+repeated name would collapse to whichever column came last: the earlier
+column's values would be discarded silently, and the resulting record would
+still carry exactly the expected field names — so strict field validation could
+not detect the loss, and the row would import cleanly at the wrong value.
+Renaming or dropping one of the columns would be a repair; the file's shape is
+genuinely ambiguous, so it is refused instead.
 
 ## Row rejection
 
@@ -318,6 +396,14 @@ uniform across trades, quotes, and bars.
 
 A bar record missing its interval, or carrying a non-positive one, is reported
 as `invalid_bar_interval` and rejected.
+
+An interval that cannot be applied to the record's timestamp without leaving
+the representable datetime range is reported as `interval_out_of_range`.
+Normalization derives interval start by subtracting the interval and the domain
+recomputes availability by adding it back; either step can overflow, so both
+are checked during validation rather than allowed to raise out of the import
+API. The domain model enforces the same invariant on construction, keeping
+`Bar.availability_time` total.
 
 ### Sub-microsecond precision
 

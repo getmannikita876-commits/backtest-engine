@@ -41,11 +41,16 @@ from quant_research_terminal.data_import.contracts import (
     ValidationIssueCode,
     ValidationSeverity,
 )
-from quant_research_terminal.data_import.numeric_semantics import is_decimal_like, to_decimal
+from quant_research_terminal.data_import.numeric_semantics import (
+    is_decimal_like,
+    is_non_finite_decimal,
+    to_decimal,
+)
 from quant_research_terminal.data_import.raw_record import RawRecord
 from quant_research_terminal.data_import.record_fields import (
     INTERVAL_FIELD,
     TIMESTAMP_FIELD,
+    decimal_fields,
     required_fields,
 )
 from quant_research_terminal.data_import.time_semantics import (
@@ -109,6 +114,28 @@ def _issue(
     )
 
 
+#: Record types whose identity cannot be established from their attributes.
+#:
+#: A trade is a *countable event*. Two separate executions can legitimately
+#: agree on timestamp, instrument, price, size, and side — one-lot fills at the
+#: same price inside the same microsecond are ordinary in real tick data — and
+#: the domain carries no venue, sequence number, or trade identifier that could
+#: tell them apart. Treating attribute equality as proof of duplication
+#: therefore deletes real executions and understates volume.
+#:
+#: A quote and a bar are different in kind. A quote is a *state observation*:
+#: two identical top-of-book snapshots for the same instant carry the same
+#: information, so collapsing them loses nothing. A bar is a *summary keyed by
+#: its period*: two identical bars for one interval are the same bar. Exact
+#: duplicate removal stays enabled for both.
+#:
+#: This is an interim policy. ADR-003 proposes the trade-identity contract that
+#: would let duplicate detection be restored for trades on a sound basis.
+UNIDENTIFIABLE_RECORD_TYPES: Final[frozenset[ImportRecordType]] = frozenset(
+    {ImportRecordType.TRADE}
+)
+
+
 def record_identity(record: RawRecord) -> tuple[object, ...] | None:
     """Return the value identifying ``record`` for duplicate comparison.
 
@@ -122,10 +149,15 @@ def record_identity(record: RawRecord) -> tuple[object, ...] | None:
 
     Returns:
         The identity tuple, or ``None`` when the record cannot participate in
-        comparison — either because a required field is missing, or because a
-        decoded value is unhashable. Both conditions are reported by other
-        validators, so returning ``None`` here avoids a duplicate diagnosis.
+        comparison. ``None`` is returned when the record type has no
+        attribute-based identity (see :data:`UNIDENTIFIABLE_RECORD_TYPES`),
+        when a required field is missing, or when a decoded value is
+        unhashable. The latter two are reported by other validators, so
+        returning ``None`` here avoids a duplicate diagnosis.
     """
+    if record.record_type in UNIDENTIFIABLE_RECORD_TYPES:
+        return None
+
     expected = required_fields(record.record_type)
     if not record.has_fields(expected):
         return None
@@ -266,7 +298,42 @@ class ValueValidator:
                 issues.append(issue)
         return tuple(issues)
 
+    @staticmethod
+    def _numeric_fields(record_type: ImportRecordType) -> tuple[str, ...]:
+        """Return the record type's numeric fields in a deterministic order.
+
+        Derived from the ordered required-field tuple rather than iterated over
+        the decimal-field set: set iteration order depends on string hashing,
+        which would make the *reported* field vary between runs when more than
+        one field is defective.
+        """
+        numeric = decimal_fields(record_type)
+        return tuple(field for field in required_fields(record_type) if field in numeric)
+
+    def _non_finite_issue(self, record: RawRecord) -> ValidationIssue | None:
+        """Report the first non-finite numeric value in the record.
+
+        Checked before any other numeric rule. Every later check is an ordering
+        comparison, and ``NaN`` makes those false while ``sNaN`` makes them
+        raise, so a non-finite value reaching them would slip through
+        undetected or abort the run.
+        """
+        for field_name in self._numeric_fields(record.record_type):
+            if is_non_finite_decimal(record.value(field_name)):
+                return _issue(
+                    severity=ValidationSeverity.ERROR,
+                    code=ValidationIssueCode.NON_FINITE_VALUE,
+                    message=f"{field_name} must be a finite number",
+                    row_index=record.source_index,
+                    field_name=field_name,
+                )
+        return None
+
     def _record_issue(self, record: RawRecord) -> ValidationIssue | None:
+        non_finite = self._non_finite_issue(record)
+        if non_finite is not None:
+            return non_finite
+
         if record.record_type is ImportRecordType.TRADE:
             return self._trade_issue(record)
         if record.record_type is ImportRecordType.QUOTE:
@@ -336,6 +403,10 @@ class ValueValidator:
             # before its own start, reintroducing look-ahead.
             return self._interval_issue(record, "interval must be strictly positive")
 
+        range_issue = self._interval_range_issue(record, interval)
+        if range_issue is not None:
+            return range_issue
+
         raw_values = [record.value(field) for field in _OHLC_FIELDS]
         if not all(is_decimal_like(value) for value in raw_values):
             return self._value_issue(record, "bar fields must be Decimal values", "open")
@@ -372,6 +443,41 @@ class ValueValidator:
         )
 
     @staticmethod
+    def _interval_range_issue(record: RawRecord, interval: timedelta) -> ValidationIssue | None:
+        """Report an interval that cannot be applied to the record's timestamp.
+
+        The record carries availability time; normalization derives interval
+        start by subtracting the interval, and the domain recomputes
+        availability by adding it back. Either step can leave the representable
+        datetime range, which raises rather than returning a value. Checking
+        both here converts that into a diagnosable rejection instead of an
+        exception escaping the import API.
+
+        A timestamp that is not a datetime is left alone — the timestamp
+        validator owns that diagnosis.
+        """
+        timestamp = record.value(TIMESTAMP_FIELD)
+        if not isinstance(timestamp, datetime):
+            return None
+
+        try:
+            interval_start = timestamp - interval
+            interval_start + interval
+        except OverflowError:
+            return _issue(
+                severity=ValidationSeverity.ERROR,
+                code=ValidationIssueCode.INTERVAL_OUT_OF_RANGE,
+                message=(
+                    f"interval {interval} cannot be applied to timestamp "
+                    f"{timestamp.isoformat()} without leaving the representable "
+                    f"datetime range"
+                ),
+                row_index=record.source_index,
+                field_name=INTERVAL_FIELD,
+            )
+        return None
+
+    @staticmethod
     def _interval_issue(record: RawRecord, message: str) -> ValidationIssue:
         return _issue(
             severity=ValidationSeverity.ERROR,
@@ -399,6 +505,10 @@ class DuplicateValidator:
     repeats; which copy survives is decided by
     :class:`~quant_research_terminal.data_import.contracts.DuplicatePolicy` in
     the orchestration layer.
+
+    Record types in :data:`UNIDENTIFIABLE_RECORD_TYPES` are skipped entirely.
+    Without an identity, attribute equality is not evidence of duplication, and
+    reporting it would invite a policy that deletes genuine records.
     """
 
     @property
@@ -425,7 +535,10 @@ class DuplicateValidator:
                 _issue(
                     severity=ValidationSeverity.WARNING,
                     code=ValidationIssueCode.DUPLICATE_ROW,
-                    message=f"duplicate of record at source index {first_index}",
+                    message=(
+                        f"identical to the record at source index {first_index}; "
+                        f"one copy will be discarded by the batch's duplicate policy"
+                    ),
                     row_index=record.source_index,
                 )
             )
