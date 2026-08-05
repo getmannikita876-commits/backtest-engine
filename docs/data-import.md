@@ -15,12 +15,16 @@ first real vendor integration.
 - The CSV provider decodes generic delimited files.
 - The **Databento provider** decodes archived Databento exports. It makes no
   network calls and handles no credentials — see "Databento provider" below.
-- The ThetaData module remains an **interface-only stub**. It carries no
-  credentials, makes no network calls, and depends on no vendor SDK. Calling
-  `fetch` raises `ProviderNotConfiguredError`.
-- Options records are not modelled. ThetaData's primary value is options data,
-  so that integration additionally depends on domain contracts that do not yet
-  exist.
+- The **ThetaData provider** decodes archived ThetaData exports on the same
+  terms, but is **experimental and unverified**: its vendor assumptions have
+  never been checked against a real export. See "ThetaData provider" below.
+- Options records are not modelled. ThetaData's primary product is options
+  data, so that part of the vendor remains out of scope: it depends on domain
+  contracts that do not yet exist.
+
+No provider is an interface-only stub any more. `ProviderNotConfiguredError`
+remains part of the provider contract so a future vendor cannot signal
+"unimplemented" by quietly returning no data.
 
 ## Stage direction
 
@@ -401,6 +405,176 @@ Databento prices carry up to 9 decimal places; the storage contract
 (`PRICE_SCALE = 6`) holds 6 and rejects precision loss. A price finer than
 1e-6 is decoded exactly by the provider but will be **rejected at storage
 time**. This does not affect ES/NQ, whose tick is 0.25.
+
+## ThetaData provider — **EXPERIMENTAL, UNVERIFIED**
+
+### Verification status
+
+This decoder was written **without inspecting a real ThetaData export**. Every
+vendor-specific detail it relies on is an assumption carried over from
+recollection of the vendor's conventions, and **none has been confirmed against
+an official primary source or a sample file**.
+
+The provider is therefore **not production-compatible**.
+`provider.verification_status` returns `experimental-unverified`, so a caller
+can gate on it rather than having to read this document.
+
+The repository's ThetaData tests do **not** constitute vendor verification.
+They were written from this implementation, so they demonstrate internal
+consistency — that the decoder does what it says — and say nothing about
+whether what it says matches ThetaData.
+
+### Assumption register
+
+Every assumption, classified by the strength of its evidence. Nothing currently
+sits in either "verified" tier.
+
+| # | Assumption | Status | Impact if wrong |
+| --- | --- | --- | --- |
+| 1 | Container is delimited text with a header row | **inferred** | Read fails loudly |
+| 2 | Delimiter is a comma | **inferred** | Read fails loudly, or one-column rows |
+| 3 | Time columns are named `date` and `ms_of_day` | **inferred** | Missing-column rejection; loud |
+| 4 | Trade columns `price`, `size` | **inferred** | Missing-column rejection; loud |
+| 5 | Quote columns `bid`, `ask`, `bid_size`, `ask_size` | **inferred** | Missing-column rejection; loud |
+| 6 | OHLC columns `open`, `high`, `low`, `close`, `volume` | **inferred** | Missing-column rejection; loud |
+| 7 | `date` is `YYYYMMDD` | **inferred** | **Silent** — a different digit order yields wrong but plausible dates |
+| 8 | `ms_of_day` is whole milliseconds since local midnight | **inferred** | **Silent** — seconds or microseconds mis-time every record within the day |
+| 9 | Times are exchange-local, not UTC | **inferred** | **Silent** — every record shifted by the zone offset |
+| 10 | The zone is US Eastern | **unknown** — operator must declare it | Mitigated: `session_timezone` is required, no default |
+| 11 | Prices are decimal text, not scaled integers | **inferred** | **Silent and worst** — a scaled encoding imports cleanly but is wrong by a constant factor |
+| 12 | Sizes/volumes are integer counts as text | **inferred** | Mostly loud via positivity rules |
+| 13 | OHLC timestamp marks interval start vs end | **unknown** — operator must declare it | Mitigated: `bar_timestamp_meaning` is required, no default |
+| 14 | `0` means "no value" | **inferred** | Low: zeros are rejected by the positivity rule either way |
+| 15 | The trade schema publishes no aggressor side | **inferred** (an assumption about *absence*) | Trades are `UNKNOWN` when a real side existed — loses information, does not fabricate it |
+| 16 | Side codes, when a `side` column exists | **unknown** — operator must supply a map | Mitigated: unmapped codes are rejected, never guessed |
+| 17 | Symbol is absent from rows and supplied per file | **inferred** | Loud: unresolved identity is rejected |
+
+Assumptions 7, 8, 9, and 11 are the dangerous ones: each would import cleanly
+and produce plausible-looking, wrong data. Assumption 11 is the single most
+important to confirm.
+
+The three `unknown` items were deliberately converted into **required operator
+declarations** rather than defaults, so the decoder cannot be wrong about them
+silently — it simply refuses to run until told.
+
+### Settling the assumptions
+
+Point the read-only inspector at a small real export:
+
+```
+python -m quant_research_terminal.data_import.providers.thetadata_inspection FILE
+```
+
+It reports the detected columns, which of them the decoder recognises, which
+schema requirements are met, the value shapes per column (integer vs decimal,
+decimal places, ranges, zeros, empties, non-numeric text), and neutral findings
+about candidate timestamp and numeric representations. It never guesses and
+never repairs: findings are phrased as what was observed, and interpreting them
+is the reader's job with the vendor schema in hand.
+
+No vendor market data is committed to this repository.
+
+### Exact implemented capability
+
+| Capability | Status |
+| --- | --- |
+| Archived delimited (CSV) export decoding | **implemented** |
+| Trade, quote, and OHLC schemas | **implemented** |
+| Live / Theta Terminal API access | not implemented |
+| Credential management | not implemented |
+| Options, Greeks, implied volatility | not implemented |
+| Order-book depth | not implemented |
+
+`provider.input_format` returns `archived-delimited-export`.
+
+Options are ThetaData's primary product and stay out of scope: the domain
+models no option contract, so declaring support would mean inventing semantics
+the rest of the system cannot represent.
+
+### Columns
+
+| Schema | Required | Optional |
+| --- | --- | --- |
+| `trade` | `date`, `ms_of_day`, `price`, `size` | `symbol`, `side` |
+| `quote` | `date`, `ms_of_day`, `bid`, `ask`, `bid_size`, `ask_size` | `symbol` |
+| `ohlc` | `date`, `ms_of_day`, `open`, `high`, `low`, `close`, `volume` | `symbol` |
+
+Columns beyond these are ignored: the provider emits only the fields the import
+contract requires, so unrecognised vendor columns cannot leak into a record.
+
+### Temporal semantics — exchange-local time
+
+ThetaData splits time across `date` (`YYYYMMDD`) and `ms_of_day` (whole
+milliseconds since local midnight), expressed in **exchange-local wall-clock
+time** rather than UTC. Both values describe the venue's event time; the
+archived export carries no separate receive or availability timestamp, so event
+time is the only coordinate available.
+
+Producing an instant therefore requires a timezone. `session_timezone` is a
+**required** constructor argument with no default — assuming a zone would
+silently shift every record by hours. ThetaData publishes US Eastern times;
+pass `zoneinfo.ZoneInfo("America/New_York")` where the platform provides the
+zone database, or an explicit fixed offset where the data is known not to span
+a transition.
+
+Two local readings cannot be resolved and are **rejected rather than guessed**:
+
+| Case | Reason | Emitted |
+| --- | --- | --- |
+| Ambiguous | The zone stepped backwards, so the reading occurs twice and the row says which | `AMBIGUOUS_LOCAL_TIME` |
+| Nonexistent | The zone stepped forwards over the reading, so it never occurred | `NONEXISTENT_LOCAL_TIME` |
+
+Both are strings, so validation reports `non_datetime_timestamp` and the row is
+rejected with a diagnosable issue.
+
+### Bars
+
+`bar_interval` **and** `bar_timestamp_meaning` are both required for the `ohlc`
+schema. The second exists because ThetaData's convention for what an OHLC
+timestamp refers to is not documented to a standard this project is willing to
+assume, and reading an interval-end stamp as a start would shift every bar by
+one interval — invisibly, and in the direction that creates look-ahead.
+
+Given the declared meaning, the interval start is derived, and the emitted
+timestamp is always the interval **close**, so a completed bar can never be
+observed at its interval start. The interval travels with the record, so
+normalization recovers interval start exactly. Session-boundary limitations are
+identical to those in ADR-002: the nominal close is calendar-unaware.
+
+### Numeric semantics
+
+Prices and sizes are decimal text, parsed straight to `Decimal`. No float is
+involved, so a tick value survives unchanged.
+
+ThetaData writes `0` where it has no value. That needs no sentinel marker: the
+domain requires strictly positive quantities, so a zero is rejected by the
+ordinary positivity rule with a diagnosable issue rather than imported as a
+real zero-priced trade.
+
+### Instrument identity
+
+The archived export usually identifies the instrument in the request rather
+than in the rows, so `instrument_symbol` may be supplied for the whole file. An
+export that carries its own `symbol` column is also supported. Resolution
+follows the same rules as Databento, including rejecting a conflict between the
+two sources, an unresolved identity, and a blank or whitespace-only symbol.
+
+### Trade side
+
+The archived trade schema publishes **no documented aggressor side**, so every
+trade decodes to `TradeSide.UNKNOWN` — an accurate record of what the vendor
+supplied, not a guess. Inferring direction from condition or exchange codes
+would fabricate order flow.
+
+An operator who does have documented side codes may supply
+`side_by_vendor_code`. A code outside that map is passed through unchanged and
+reported as `invalid_trade_side`, keeping "the source does not publish a side"
+distinct from "we did not understand the code it published".
+
+### Verification status
+
+See the assumption register at the top of this section. Nothing is verified;
+the provider is experimental.
 
 ## Validation composition
 

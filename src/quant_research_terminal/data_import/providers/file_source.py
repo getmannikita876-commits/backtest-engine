@@ -66,6 +66,65 @@ def iter_delimited_rows(
             yield source_index, dict(zip(header, row, strict=True))
 
 
+def require_non_blank_symbol(symbol: str, label: str) -> str:
+    """Return ``symbol`` unchanged, rejecting a blank or whitespace-only value.
+
+    ``"   "`` satisfies the domain's ``min_length`` constraint while carrying no
+    instrument identity at all, so it must never reach a record. Checking at
+    configuration time fails at the call site rather than days later inside a
+    research result.
+
+    Raises:
+        ValueError: if the symbol contains no non-whitespace character.
+    """
+    if not symbol.strip():
+        raise ValueError(
+            f"{label} is blank; an instrument symbol must contain a non-whitespace value"
+        )
+    return symbol
+
+
+def reconcile_symbols(
+    *,
+    embedded: str | None,
+    configured: str | None,
+    context: str,
+    configured_label: str,
+) -> str:
+    """Return the single instrument symbol two sources agree on.
+
+    Both sources are consulted rather than short-circuiting on the first, so a
+    disagreement is reported instead of being silently resolved in favour of
+    one of them: two sources contradicting each other about instrument identity
+    is a defect worth stopping for.
+
+    Args:
+        embedded: The symbol carried by the archived record, if any.
+        configured: The symbol supplied by the caller, if any.
+        context: Where the record came from, for the error message.
+        configured_label: How to name the caller's source in the error message.
+
+    Raises:
+        ProviderDecodeError: if the sources conflict, or neither resolves.
+    """
+    embedded_symbol = (embedded or "").strip()
+    configured_symbol = (configured or "").strip()
+
+    if embedded_symbol and configured_symbol and embedded_symbol != configured_symbol:
+        raise ProviderDecodeError(
+            f"{context} has conflicting instrument identity: the export says "
+            f"{embedded_symbol!r} but {configured_label} says {configured_symbol!r}"
+        )
+
+    resolved = embedded_symbol or configured_symbol
+    if not resolved:
+        raise ProviderDecodeError(
+            f"{context} has no usable instrument symbol and no {configured_label}; "
+            f"the instrument cannot be identified"
+        )
+    return resolved
+
+
 def is_excluded_by_request(fields: Mapping[str, Any], request: ProviderRequest) -> bool:
     """Return whether a decoded record falls outside ``request``.
 

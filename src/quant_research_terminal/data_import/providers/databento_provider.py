@@ -75,6 +75,8 @@ from quant_research_terminal.data_import.providers.databento_decoding import (
 from quant_research_terminal.data_import.providers.file_source import (
     is_excluded_by_request,
     iter_delimited_rows,
+    reconcile_symbols,
+    require_non_blank_symbol,
 )
 from quant_research_terminal.data_import.providers.provider import (
     ProviderCapabilities,
@@ -100,15 +102,10 @@ def _validated_symbol_mapping(mapping: Mapping[int, str] | None) -> dict[int, st
     check while carrying no instrument identity at all. Rejecting it here fails
     at the call site instead of days later inside a research result.
     """
-    validated: dict[int, str] = {}
-    for instrument_id, symbol in (mapping or {}).items():
-        if not symbol.strip():
-            raise ValueError(
-                f"symbol_by_instrument_id[{instrument_id}] is blank; "
-                f"an instrument symbol must contain a non-whitespace value"
-            )
-        validated[instrument_id] = symbol
-    return validated
+    return {
+        instrument_id: require_non_blank_symbol(symbol, f"symbol_by_instrument_id[{instrument_id}]")
+        for instrument_id, symbol in (mapping or {}).items()
+    }
 
 
 def _validated_bar_interval(
@@ -336,22 +333,12 @@ class DatabentoMarketDataProvider:
             ProviderDecodeError: if the instrument cannot be resolved, or if the
                 export and the supplied mapping disagree about it.
         """
-        embedded = row.get(SYMBOL_COLUMN, "").strip()
-        mapped = self._mapped_symbol(row, source_index)
-
-        if embedded and mapped is not None and embedded != mapped:
-            raise ProviderDecodeError(
-                f"{self._path} row {source_index} has conflicting instrument identity: "
-                f"the export says {embedded!r} but symbol_by_instrument_id says {mapped!r}"
-            )
-
-        resolved = embedded or mapped
-        if not resolved:
-            raise ProviderDecodeError(
-                f"{self._path} row {source_index} has no usable {SYMBOL_COLUMN!r} value and "
-                f"no {INSTRUMENT_ID_COLUMN!r} mapping; the instrument cannot be identified"
-            )
-        return resolved
+        return reconcile_symbols(
+            embedded=row.get(SYMBOL_COLUMN),
+            configured=self._mapped_symbol(row, source_index),
+            context=f"{self._path} row {source_index}",
+            configured_label="symbol_by_instrument_id",
+        )
 
     def _mapped_symbol(self, row: Mapping[str, str], source_index: int) -> str | None:
         """Return the symbol the caller's mapping gives this row, if any."""

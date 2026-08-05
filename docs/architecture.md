@@ -51,12 +51,32 @@ The approved import rules — stream ownership, batch-fatal schema versions,
 timestamp semantics, quantity positivity, duplicate handling, and the complete
 event ordering key — are recorded in `docs/data-import.md`.
 
-Vendor coverage is deliberately narrow. The Databento provider decodes
-**archived delimited exports only**: no binary DBN, no API acquisition, no
-credentials. Keeping acquisition out of the import layer is what allows an
-archived file to be the reproducible unit of research input. A future vendor
-SDK may be an optional dependency confined to its own provider package; the
-engine still depends only on `MarketDataProvider`.
+Vendor coverage is deliberately narrow. The Databento and ThetaData providers
+decode **archived delimited exports only**: no binary DBN, no API acquisition,
+no credentials, no options. Keeping acquisition out of the import layer is what
+allows an archived file to be the reproducible unit of research input. A future
+vendor SDK may be an optional dependency confined to its own provider package;
+the engine still depends only on `MarketDataProvider`.
+
+Vendor-specific decoding lives in a pure module per vendor
+(`databento_decoding.py`, `thetadata_decoding.py`) that performs no IO, so every
+encoding rule is testable without a file. Shared file plumbing — delimited
+reading, request filtering, symbol reconciliation — lives in `file_source.py`
+so the vendors cannot drift apart on it.
+
+Where a vendor's semantics are not documented to a standard the project is
+willing to assume, the provider requires the operator to declare them rather
+than defaulting: ThetaData's session timezone and OHLC timestamp meaning are
+both required arguments, because a wrong default would shift every record
+invisibly.
+
+A provider whose vendor assumptions have not been checked against a real export
+carries that status as data. The ThetaData provider reports
+`verification_status == "experimental-unverified"` and is not
+production-compatible; passing tests do not change that, since the tests were
+written from the implementation rather than from the vendor. A read-only
+inspector (`thetadata_inspection`) exists to settle the assumptions against a
+user-supplied file without guessing or repairing anything.
 
 Bars carry both temporal coordinates — `interval_start` and `interval` — and
 derive availability time from them, so a completed bar cannot be observed
