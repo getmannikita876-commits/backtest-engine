@@ -21,6 +21,14 @@ from quant_research_terminal.data_import.contracts import ImportRecordType
 TIMESTAMP_FIELD: Final = "timestamp"
 INSTRUMENT_FIELD: Final = "instrument_symbol"
 
+#: The duration a bar covers, carried as a :class:`~datetime.timedelta`.
+#:
+#: Bars carry availability time in ``timestamp`` and their duration here;
+#: interval start is exactly ``timestamp - interval``. Keeping ``timestamp``
+#: on every record type is what lets the timestamp, ordering, and window-filter
+#: rules stay uniform across trades, quotes, and bars.
+INTERVAL_FIELD: Final = "interval"
+
 TRADE_FIELDS: Final[tuple[str, ...]] = (
     TIMESTAMP_FIELD,
     INSTRUMENT_FIELD,
@@ -41,6 +49,7 @@ QUOTE_FIELDS: Final[tuple[str, ...]] = (
 BAR_FIELDS: Final[tuple[str, ...]] = (
     TIMESTAMP_FIELD,
     INSTRUMENT_FIELD,
+    INTERVAL_FIELD,
     "open",
     "high",
     "low",

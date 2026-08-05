@@ -39,7 +39,7 @@ from quant_research_terminal.data_import.providers.databento_decoding import (
     decode_quantity,
     decode_trade_side,
 )
-from quant_research_terminal.domain.models import Bar, Quote, Trade
+from quant_research_terminal.domain.models import Bar, Quote, Trade, TradeSide
 
 # 2024-01-02T12:00:00Z expressed in nanoseconds since the epoch.
 BASE_NS = 1_704_196_800_000_000_000
@@ -207,10 +207,16 @@ def test_documented_aggressor_sides_are_mapped(code: str, expected: str) -> None
     assert decode_trade_side(code) == expected
 
 
-def test_unattributed_side_is_not_guessed() -> None:
-    # 'N' means the vendor could not attribute a side. Inventing one would
-    # fabricate a fact the vendor did not supply.
-    assert decode_trade_side("N") == "N"
+def test_unattributed_side_decodes_to_unknown() -> None:
+    # 'N' means the vendor could not attribute a side. The domain records that
+    # explicitly; it is never promoted to a direction.
+    assert decode_trade_side("N") is TradeSide.UNKNOWN
+
+
+def test_unrecognised_side_code_is_not_mapped_to_unknown() -> None:
+    # Keeps "the vendor said it does not know" distinct from "we failed to
+    # understand the vendor"; validation rejects the latter.
+    assert decode_trade_side("X") == "X"
 
 
 # --------------------------------------------------------------------------
@@ -558,13 +564,25 @@ def test_undefined_price_row_is_rejected_by_validation(tmp_path: Path) -> None:
     assert "non_decimal_price" in [issue.code.value for issue in report.issues]
 
 
-def test_unattributed_side_still_reaches_the_domain_unaltered(tmp_path: Path) -> None:
-    # Documented gap: the frozen contract does not validate trade side, so an
-    # unmapped vendor code flows through. It must at least arrive unchanged.
+def test_unattributed_side_is_preserved_as_unknown(tmp_path: Path) -> None:
+    # The domain can now record an unattributed aggressor, so the trade is
+    # imported rather than discarded, and is never counted as a direction.
     path = _trades_file(tmp_path, _trade_row(side="N"))
 
     records = list(_provider(path).fetch(_request()))
-    accepted, _ = validate_import_batch(raw_records_to_import_batch(records))
+    accepted, report = validate_import_batch(raw_records_to_import_batch(records))
     trades = [record for record in accepted if isinstance(record, Trade)]
 
-    assert [trade.side for trade in trades] == ["N"]
+    assert report.success is True
+    assert [trade.side for trade in trades] == [TradeSide.UNKNOWN]
+    assert trades[0].side.is_directional is False
+
+
+def test_unrecognised_side_code_is_rejected_by_validation(tmp_path: Path) -> None:
+    path = _trades_file(tmp_path, _trade_row(side="X"))
+
+    records = list(_provider(path).fetch(_request()))
+    accepted, report = validate_import_batch(raw_records_to_import_batch(records))
+
+    assert accepted == []
+    assert "invalid_trade_side" in [issue.code.value for issue in report.issues]

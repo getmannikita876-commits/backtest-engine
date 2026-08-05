@@ -42,6 +42,7 @@ def _bar_row(**overrides: object) -> dict[str, object]:
     row: dict[str, object] = {
         "timestamp": datetime(2024, 1, 2, 12, 0, 0, tzinfo=UTC),
         "instrument_symbol": "ES",
+        "interval": timedelta(minutes=1),
         "open": Decimal("4999.50"),
         "high": Decimal("5002.00"),
         "low": Decimal("4998.75"),

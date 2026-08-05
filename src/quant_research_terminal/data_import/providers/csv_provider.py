@@ -27,7 +27,7 @@ ambiguous and no per-row diagnosis is meaningful.
 from __future__ import annotations
 
 from collections.abc import Generator
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Final
@@ -45,12 +45,16 @@ from quant_research_terminal.data_import.providers.provider import (
 )
 from quant_research_terminal.data_import.raw_record import RawRecord
 from quant_research_terminal.data_import.record_fields import (
+    INTERVAL_FIELD,
     TIMESTAMP_FIELD,
     decimal_fields,
 )
 
 DEFAULT_PROVIDER_NAME: Final = "csv"
 DEFAULT_ENCODING: Final = "utf-8"
+
+#: Decimal exponent converting seconds to microseconds.
+_MICROSECONDS_PER_SECOND_EXPONENT: Final = 6
 
 
 class CsvMarketDataProvider:
@@ -155,9 +159,34 @@ class CsvMarketDataProvider:
                 return datetime.fromisoformat(text)
             except ValueError:
                 return text
+        if field_name == INTERVAL_FIELD:
+            return _decode_interval(text)
         if field_name in self._decimal_fields:
             try:
                 return Decimal(text)
             except InvalidOperation:
                 return text
+        return text
+
+
+def _decode_interval(text: str) -> Any:
+    """Decode a bar interval expressed as decimal seconds.
+
+    Seconds are used because they are human-readable and exact: the text is
+    parsed as a :class:`~decimal.Decimal` and scaled to whole microseconds, so
+    no float is involved and any microsecond-resolution interval survives
+    unchanged. Text that is not an exact whole number of microseconds is
+    returned unchanged for validation to report, rather than rounded.
+    """
+    try:
+        seconds = Decimal(text)
+    except InvalidOperation:
+        return text
+
+    microseconds = seconds.scaleb(_MICROSECONDS_PER_SECOND_EXPONENT)
+    if microseconds != microseconds.to_integral_value():
+        return text
+    try:
+        return timedelta(microseconds=int(microseconds))
+    except (OverflowError, ValueError):
         return text

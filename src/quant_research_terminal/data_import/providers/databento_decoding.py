@@ -51,8 +51,10 @@ from typing import Any, Final
 from quant_research_terminal.data_import.contracts import ImportRecordType
 from quant_research_terminal.data_import.record_fields import (
     INSTRUMENT_FIELD,
+    INTERVAL_FIELD,
     TIMESTAMP_FIELD,
 )
+from quant_research_terminal.domain.models import TradeSide
 
 #: Common Databento OHLCV interval durations, for callers that prefer a name
 #: over a literal. The provider accepts any strictly positive interval.
@@ -146,21 +148,24 @@ class SubMicrosecondPolicy(StrEnum):
 
 #: Databento's aggressor-side encoding.
 #:
-#: ``A`` (ask) marks a sell aggressor and ``B`` (bid) a buy aggressor. ``N``
-#: means the vendor could not attribute a side; it has no domain
-#: representation and is passed through unchanged rather than guessed.
-TRADE_SIDE_BY_VENDOR_CODE: Final[Mapping[str, str]] = {
-    "A": "sell",
-    "B": "buy",
+#: ``A`` (ask) marks a sell aggressor and ``B`` (bid) a buy aggressor.
+#: ``N`` maps to :attr:`TradeSide.UNKNOWN` because that is exactly what the
+#: vendor is asserting — it could not attribute the aggressor. Recording that
+#: is not the same as inferring a direction, and nothing downstream promotes
+#: ``UNKNOWN`` to ``BUY`` or ``SELL``. Codes outside this table are passed
+#: through unchanged so validation rejects them, keeping "the vendor said it
+#: does not know" distinct from "we did not understand the vendor".
+TRADE_SIDE_BY_VENDOR_CODE: Final[Mapping[str, TradeSide]] = {
+    "A": TradeSide.SELL,
+    "B": TradeSide.BUY,
+    "N": TradeSide.UNKNOWN,
 }
 
-#: The only side values this decoder will ever produce from a known vendor code.
+#: The sides that identify an actual aggressor.
 #:
-#: ``Trade.side`` is an unconstrained string in the current domain contract, so
-#: a consumer cannot rely on the type system to tell it that a side is known.
-#: Checking membership here is the supported way to detect an unattributed
-#: side. See ``docs/data-import.md`` for the proposed contract change.
-KNOWN_TRADE_SIDES: Final[frozenset[str]] = frozenset(TRADE_SIDE_BY_VENDOR_CODE.values())
+#: Prefer :attr:`TradeSide.is_directional` on a validated domain object; this
+#: set is for code inspecting raw records before normalization.
+KNOWN_TRADE_SIDES: Final[frozenset[TradeSide]] = frozenset({TradeSide.BUY, TradeSide.SELL})
 
 # Vendor column names.
 INSTRUMENT_ID_COLUMN: Final = "instrument_id"
@@ -243,11 +248,15 @@ def decode_quantity(value: object) -> Any:
 
 
 def decode_trade_side(value: object) -> Any:
-    """Decode Databento's aggressor-side character.
+    """Decode Databento's aggressor-side character into a :class:`TradeSide`.
 
-    An unrecognised code — including ``N`` for "no side" — is returned
-    unchanged. The domain has no representation for an unattributed aggressor,
-    and guessing one would invent a fact the vendor did not supply.
+    ``A`` becomes ``SELL``, ``B`` becomes ``BUY``, and ``N`` becomes
+    ``UNKNOWN`` — the vendor stating it could not attribute the trade, which
+    the domain can now record faithfully.
+
+    An unrecognised code is returned unchanged so validation reports it. It is
+    deliberately *not* mapped to ``UNKNOWN``, which would erase the difference
+    between a vendor's explicit "no side" and a decoding failure.
     """
     if isinstance(value, str):
         return TRADE_SIDE_BY_VENDOR_CODE.get(value.strip().upper(), value)
@@ -343,6 +352,7 @@ def decode_bar_fields(
     fields: dict[str, Any] = {
         TIMESTAMP_FIELD: bar_availability_timestamp(interval_start, interval),
         INSTRUMENT_FIELD: symbol,
+        INTERVAL_FIELD: interval,
     }
     for column in OHLCV_COLUMNS:
         if column == "volume":

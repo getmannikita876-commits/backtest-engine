@@ -26,9 +26,15 @@ PositiveDecimal = Annotated[Decimal, BeforeValidator(_coerce_decimal), Field(gt=
 
 
 class _BaseDomainModel(BaseModel):
-    """Base model with immutable semantics for the domain package."""
+    """Base model with immutable semantics for the domain package.
 
-    model_config = ConfigDict(frozen=True, strict=True)
+    ``extra="forbid"`` matters as much as ``frozen``: a field that a model no
+    longer stores must raise rather than be silently discarded, so a caller
+    still passing a retired keyword learns immediately instead of constructing
+    a model that quietly ignored part of its input.
+    """
+
+    model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
 
 
 class _UtcTimestampModel(_BaseDomainModel):

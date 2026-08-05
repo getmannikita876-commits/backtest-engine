@@ -83,9 +83,36 @@ Not implemented, with reasons:
   without compromising provider independence.
 - **ThetaData**, which remains an interface-only stub.
 
-Open contract question: ADR-002 proposes adding `interval_start` and `interval`
-to the domain `Bar` so both temporal coordinates are explicit. Adopting it
-requires a storage schema revision and is a separate decision.
+Open contract question, resolved in Phase 1.5: ADR-002's proposed domain change
+was accepted.
+
+## Phase 1.5 — Domain time hardening (in progress)
+
+Hardens the audited domain and storage contracts before another provider is
+built on them.
+
+- **Bar temporal model.** `Bar` stores `interval_start` and `interval`;
+  `availability_time` is a derived property, with `timestamp` as its alias.
+  Look-ahead is impossible by construction rather than by validation — there is
+  no field in which a wrong availability could be placed.
+- **`TradeSide` enum** (`BUY`, `SELL`, `UNKNOWN`) replaces the unconstrained
+  `side` string. `UNKNOWN` is a recorded fact and is never inferred; an
+  unrecognised vendor code is rejected rather than folded into it.
+- **Storage `SCHEMA_VERSION` 1 → 2.** Bars gained `interval_microseconds`; the
+  `side` column is constrained to the `TradeSide` vocabulary. Version-1 data is
+  rejected, not migrated — a version-1 bar records no interval, so migrating it
+  would mean guessing one.
+- New validation codes `invalid_bar_interval` and `invalid_trade_side`, so both
+  defects are diagnosable rejections rather than raw model errors during
+  normalization.
+- ADR-002 accepted, with the revision that availability is derived rather than
+  stored.
+
+Unchanged in this phase: no replay engine, execution engine, strategy SDK,
+ThetaData, options, Monte Carlo, or prop-firm evaluation. The Databento
+provider was updated only as far as the new contracts required.
+
+Still open: the nominal session close remains calendar-unaware.
 
 ## Later phases (gated)
 

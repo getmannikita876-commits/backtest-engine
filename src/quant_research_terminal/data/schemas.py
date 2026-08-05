@@ -47,10 +47,14 @@ QUOTE_ARROW_SCHEMA: pa.Schema = pa.schema(
     metadata=_arrow_schema_metadata(),
 )
 
+#: Bars persist their availability timestamp plus the interval they cover.
+#: Interval start is not stored separately because it is exactly
+#: ``timestamp - interval``; storing both would allow the two to disagree.
 BAR_ARROW_SCHEMA: pa.Schema = pa.schema(
     [
         pa.field("timestamp", pa.timestamp("us", tz="UTC")),
         pa.field("instrument_symbol", pa.utf8()),
+        pa.field("interval_microseconds", pa.uint64()),
         pa.field("open", pa.int64()),
         pa.field("high", pa.int64()),
         pa.field("low", pa.int64()),
@@ -85,6 +89,7 @@ BAR_POLARS_SCHEMA: pl.Schema = pl.Schema(
     [
         ("timestamp", pl.Datetime(time_unit="us", time_zone="UTC")),
         ("instrument_symbol", pl.Utf8),
+        ("interval_microseconds", pl.UInt64),
         ("open", pl.Int64),
         ("high", pl.Int64),
         ("low", pl.Int64),

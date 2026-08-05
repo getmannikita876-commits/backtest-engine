@@ -300,11 +300,20 @@ This is a decode, not a mutation:
 The full rationale, rejected alternatives, and the proposed domain-contract
 change are in `docs/adr/ADR-002-bar-availability-time.md`.
 
-**Known limitation:** because the domain `Bar` carries one timestamp, interval
-start is no longer directly readable from an imported bar, and a bar does not
-record its own duration. ADR-002 proposes adding `interval_start` and
-`interval` to the domain contract to resolve this; that requires a storage
-schema revision and is a separate decision.
+**Phase 1.5 update.** ADR-002's proposed contract change was accepted, and
+strengthened: `Bar` now stores `interval_start` and `interval`, and
+`availability_time` is a *derived property* rather than a stored field. A bar
+that becomes visible before its interval closes is no longer merely invalid —
+it is unconstructible, because there is no field in which to put a wrong value.
+`Bar.timestamp` remains as an alias for `availability_time`.
+
+Import records carry `timestamp` (availability) and `interval`; the normalizer
+derives `interval_start = timestamp - interval`. Keeping `timestamp` on every
+record type is what lets the timestamp, ordering, and window-filter rules stay
+uniform across trades, quotes, and bars.
+
+A bar record missing its interval, or carrying a non-positive one, is reported
+as `invalid_bar_interval` and rejected.
 
 ### Sub-microsecond precision
 
@@ -366,26 +375,25 @@ eagerly fails at the call site rather than days later inside a result.
 
 ### Trade side
 
-`A` decodes to `sell` and `B` to `buy`. `N` — the vendor could not attribute an
-aggressor — is **passed through unchanged and never guessed**. Mapping it to a
-direction would fabricate a fact the vendor did not supply, and would bias any
-order-flow research built on it.
+`Trade.side` is a `TradeSide` enum — `BUY`, `SELL`, or `UNKNOWN` — not a
+string. The domain accepts the enum's canonical values on construction so
+stored rows and configuration need no special handling, and rejects anything
+else.
 
-**Known limitation.** `Trade.side` is an unconstrained `str` in the current
-domain contract, so an unattributed side reaches the domain as the literal
-vendor code `"N"`. Nothing validates it, and a consumer testing
-`side == "buy"` will treat it as though it were a sell. The contract cannot
-express "unknown" *safely* — only incidentally.
+Databento decoding: `B` → `BUY`, `A` → `SELL`, `N` → `UNKNOWN`.
 
-Until that changes, `KNOWN_TRADE_SIDES` (`{"buy", "sell"}`) is the supported
-way to detect an unattributed side; treat any value outside it as unknown.
+`N` maps to `UNKNOWN` because that is precisely what the vendor is asserting —
+it could not attribute the aggressor. Recording that is not inferring a
+direction, and nothing anywhere promotes `UNKNOWN` to `BUY` or `SELL`.
 
-**Smallest proposed contract change:** replace `Trade.side: str` with a
-`TradeSide` StrEnum of `BUY`, `SELL`, `UNKNOWN`. This makes the unknown case
-representable and type-checkable, and lets validation reject codes outside the
-vocabulary. It touches the audited Phase 1.1 domain model and the storage
-encoding of the `side` column, so it warrants its own ADR rather than being
-folded into a provider change.
+A vendor code **outside** that table is passed through unchanged and reported
+as `invalid_trade_side`. It is deliberately not mapped to `UNKNOWN`, which
+would erase the difference between "the vendor said it does not know" and "we
+failed to understand the vendor".
+
+Use `TradeSide.is_directional` to exclude unattributed trades from order-flow
+calculations, so they are skipped explicitly rather than falling into whichever
+branch happens to be last.
 
 ### Storage precision constraint
 

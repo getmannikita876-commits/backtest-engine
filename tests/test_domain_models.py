@@ -5,7 +5,9 @@ from typing import Any, cast
 import pytest
 from pydantic import ValidationError
 
-from quant_research_terminal.domain.models import Bar, Instrument, Quote, Trade
+from quant_research_terminal.domain.models import Bar, Instrument, Quote, Trade, TradeSide
+
+ONE_MINUTE = timedelta(minutes=1)
 
 
 def test_instrument_is_immutable_and_uses_utc_datetimes() -> None:
@@ -28,7 +30,7 @@ def test_trade_validates_positive_price_and_quantity() -> None:
         timestamp=datetime(2024, 1, 2, 12, 0, 0, tzinfo=UTC),
         price=Decimal("5000.25"),
         size=Decimal("2"),
-        side="buy",
+        side=TradeSide.BUY,
     )
 
     assert trade.price == Decimal("5000.25")
@@ -40,7 +42,7 @@ def test_trade_validates_positive_price_and_quantity() -> None:
             timestamp=datetime(2024, 1, 2, 12, 0, 0, tzinfo=UTC),
             price=Decimal("0"),
             size=Decimal("2"),
-            side="buy",
+            side=TradeSide.BUY,
         )
 
     with pytest.raises(ValidationError):
@@ -49,7 +51,7 @@ def test_trade_validates_positive_price_and_quantity() -> None:
             timestamp=datetime(2024, 1, 2, 12, 0, 0, tzinfo=UTC),
             price=Decimal("5000.25"),
             size=Decimal("0"),
-            side="buy",
+            side=TradeSide.BUY,
         )
 
 
@@ -84,7 +86,7 @@ def test_rejects_float_inputs_for_decimal_fields() -> None:
             timestamp=datetime(2024, 1, 2, 12, 0, 0, tzinfo=UTC),
             price=cast(Any, 5.25),
             size=Decimal("2"),
-            side="buy",
+            side=TradeSide.BUY,
         )
 
     with pytest.raises(ValidationError):
@@ -101,7 +103,8 @@ def test_rejects_float_inputs_for_decimal_fields() -> None:
 def test_bar_validates_ohlc_and_volume() -> None:
     bar = Bar(
         instrument_symbol="ES",
-        timestamp=datetime(2024, 1, 2, 12, 0, 0, tzinfo=UTC),
+        interval_start=datetime(2024, 1, 2, 12, 0, 0, tzinfo=UTC),
+        interval=ONE_MINUTE,
         open=Decimal("4999.50"),
         high=Decimal("5002.00"),
         low=Decimal("4998.75"),
@@ -114,7 +117,8 @@ def test_bar_validates_ohlc_and_volume() -> None:
     with pytest.raises(ValidationError):
         Bar(
             instrument_symbol="ES",
-            timestamp=datetime(2024, 1, 2, 12, 0, 0, tzinfo=UTC),
+            interval_start=datetime(2024, 1, 2, 12, 0, 0, tzinfo=UTC),
+            interval=ONE_MINUTE,
             open=Decimal("5000.00"),
             high=Decimal("4999.00"),
             low=Decimal("4998.75"),
@@ -125,7 +129,8 @@ def test_bar_validates_ohlc_and_volume() -> None:
     with pytest.raises(ValidationError):
         Bar(
             instrument_symbol="ES",
-            timestamp=datetime(2024, 1, 2, 12, 0, 0, tzinfo=UTC),
+            interval_start=datetime(2024, 1, 2, 12, 0, 0, tzinfo=UTC),
+            interval=ONE_MINUTE,
             open=Decimal("5000.00"),
             high=Decimal("5002.00"),
             low=Decimal("4998.75"),
@@ -141,7 +146,7 @@ def test_rejects_naive_datetime_values() -> None:
             timestamp=datetime(2024, 1, 2, 12, 0, 0),
             price=Decimal("5000.25"),
             size=Decimal("2"),
-            side="buy",
+            side=TradeSide.BUY,
         )
 
     with pytest.raises(ValidationError, match="timezone-aware UTC"):
@@ -159,7 +164,8 @@ def test_rejects_non_utc_timezones() -> None:
     with pytest.raises(ValidationError, match="UTC"):
         Bar(
             instrument_symbol="ES",
-            timestamp=datetime(2024, 1, 2, 12, 0, 0, tzinfo=timezone(timedelta(hours=1))),
+            interval_start=datetime(2024, 1, 2, 12, 0, 0, tzinfo=timezone(timedelta(hours=1))),
+            interval=ONE_MINUTE,
             open=Decimal("4999.50"),
             high=Decimal("5002.00"),
             low=Decimal("4998.75"),
