@@ -38,6 +38,7 @@ from quant_research_terminal.data_import.pipeline import (
 )
 from quant_research_terminal.data_import.providers import (
     KNOWN_TRADE_SIDES,
+    BarTimestampMeaning,
     CsvMarketDataProvider,
     DatabentoMarketDataProvider,
     DatabentoSchema,
@@ -52,8 +53,10 @@ from quant_research_terminal.data_import.providers import (
     RecordStream,
     SubMicrosecondPolicy,
     ThetaDataMarketDataProvider,
+    ThetaDataSchema,
     bar_availability_timestamp,
     databento_record_type,
+    thetadata_record_type,
 )
 from quant_research_terminal.data_import.raw_record import (
     RawRecord,
@@ -86,6 +89,7 @@ from quant_research_terminal.data_import.validation import (
 __all__ = [
     "EVENT_TYPE_PRECEDENCE",
     "KNOWN_TRADE_SIDES",
+    "BarTimestampMeaning",
     "CsvMarketDataProvider",
     "DataImportSource",
     "DatabentoMarketDataProvider",
@@ -112,6 +116,7 @@ __all__ = [
     "SchemaValidator",
     "SubMicrosecondPolicy",
     "ThetaDataMarketDataProvider",
+    "ThetaDataSchema",
     "TimestampStatus",
     "TimestampValidator",
     "UtcTimestampError",
@@ -136,6 +141,7 @@ __all__ = [
     "record_identity",
     "require_utc",
     "required_fields",
+    "thetadata_record_type",
     "to_decimal",
     "validate_import_batch",
 ]

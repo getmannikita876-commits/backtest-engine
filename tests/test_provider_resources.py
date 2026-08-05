@@ -20,10 +20,10 @@ from quant_research_terminal.data_import import (
     ImportRecordType,
     MarketDataProvider,
     ProviderDecodeError,
-    ProviderNotConfiguredError,
     ProviderRequest,
     RecordStream,
     ThetaDataMarketDataProvider,
+    ThetaDataSchema,
 )
 
 TRADE_HEADER = "timestamp,instrument_symbol,price,size,side"
@@ -322,13 +322,22 @@ def test_stream_closed_before_iteration_opens_no_handle(tmp_path: Path, spy: _Ha
     assert list(stream) == []
 
 
-def test_stub_providers_raise_before_returning_a_stream() -> None:
-    # The stream contract must not paper over an unimplemented vendor by
-    # handing back an empty, already-closed stream.
-    provider: MarketDataProvider = ThetaDataMarketDataProvider()
+def test_vendor_provider_streams_are_closeable_through_the_interface(tmp_path: Path) -> None:
+    # Every implemented vendor must offer the same resource guarantee, not
+    # just the CSV provider the stream contract was first written against.
+    path = tmp_path / "thetadata.csv"
+    path.write_text("date,ms_of_day,price,size\n20240102,43200000,5000.25,2\n", encoding="utf-8")
+    provider: MarketDataProvider = ThetaDataMarketDataProvider(
+        path=path,
+        schema=ThetaDataSchema.TRADE,
+        session_timezone=UTC,
+        instrument_symbol="ES",
+    )
 
-    with pytest.raises(ProviderNotConfiguredError):
-        provider.fetch(_request())
+    with provider.fetch(_request()) as stream:
+        assert next(iter(stream)) is not None
+
+    assert stream.closed is True
 
 
 def test_crlf_line_endings_do_not_leak_into_values(tmp_path: Path) -> None:

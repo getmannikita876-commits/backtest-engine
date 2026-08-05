@@ -15,9 +15,11 @@ from quant_research_terminal.data_import import (
     ProviderCapabilities,
     ProviderCapabilityError,
     ProviderDecodeError,
+    ProviderError,
     ProviderNotConfiguredError,
     ProviderRequest,
     ThetaDataMarketDataProvider,
+    ThetaDataSchema,
 )
 
 TRADE_HEADER = "timestamp,instrument_symbol,price,size,side"
@@ -119,7 +121,11 @@ def test_every_provider_satisfies_the_interface(tmp_path: Path) -> None:
     providers: list[MarketDataProvider] = [
         _trade_provider(_trade_csv(tmp_path)),
         DatabentoMarketDataProvider(path=tmp_path / "databento.csv", schema=DatabentoSchema.TRADES),
-        ThetaDataMarketDataProvider(),
+        ThetaDataMarketDataProvider(
+            path=tmp_path / "thetadata.csv",
+            schema=ThetaDataSchema.TRADE,
+            session_timezone=UTC,
+        ),
     ]
 
     for provider in providers:
@@ -325,23 +331,8 @@ def test_header_only_file_yields_no_records(tmp_path: Path) -> None:
 
 
 # --------------------------------------------------------------------------
-# Vendor stubs
+# Vendor capability declarations
 # --------------------------------------------------------------------------
-
-
-def test_thetadata_stub_declares_itself_unimplemented() -> None:
-    capabilities = ThetaDataMarketDataProvider().capabilities
-
-    assert capabilities.provider_name == "thetadata"
-    assert capabilities.is_implemented is False
-    assert capabilities.requires_credentials is True
-
-
-def test_thetadata_stub_raises_instead_of_returning_no_data() -> None:
-    # Returning an empty iterator would be indistinguishable from a real vendor
-    # legitimately having no data in the window.
-    with pytest.raises(ProviderNotConfiguredError, match="interface-only stub"):
-        list(ThetaDataMarketDataProvider().fetch(_trade_request()))
 
 
 def test_databento_is_no_longer_a_stub(tmp_path: Path) -> None:
@@ -354,3 +345,24 @@ def test_databento_is_no_longer_a_stub(tmp_path: Path) -> None:
     assert capabilities.provider_name == "databento"
     assert capabilities.is_implemented is True
     assert capabilities.requires_credentials is False
+
+
+def test_thetadata_is_no_longer_a_stub(tmp_path: Path) -> None:
+    # Phase 1.6 replaced the ThetaData stub with a real archived-export
+    # decoder, which likewise authenticates nothing.
+    capabilities = ThetaDataMarketDataProvider(
+        path=tmp_path / "thetadata.csv",
+        schema=ThetaDataSchema.TRADE,
+        session_timezone=UTC,
+    ).capabilities
+
+    assert capabilities.provider_name == "thetadata"
+    assert capabilities.is_implemented is True
+    assert capabilities.requires_credentials is False
+
+
+def test_not_configured_error_remains_part_of_the_contract() -> None:
+    # No provider is an interface-only stub any more, but the error stays in
+    # the contract so a future vendor cannot signal "unimplemented" by quietly
+    # returning no data.
+    assert issubclass(ProviderNotConfiguredError, ProviderError)

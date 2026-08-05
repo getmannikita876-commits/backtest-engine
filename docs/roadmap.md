@@ -114,6 +114,54 @@ provider was updated only as far as the new contracts required.
 
 Still open: the nominal session close remains calendar-unaware.
 
+## Phase 1.6 — ThetaData archived provider (in progress)
+
+Implements deterministic decoding of archived ThetaData exports through the
+existing provider architecture. No frozen contract required changing.
+
+| Capability | Status |
+| --- | --- |
+| Archived delimited (CSV) export decoding | **implemented** |
+| Trade, quote, and OHLC schemas | **implemented** |
+| Live / Theta Terminal API access | not implemented |
+| Credential management | not implemented |
+| Options, Greeks, implied volatility | not implemented |
+| Order-book depth | not implemented |
+
+Decisions worth noting:
+
+- **Session timezone is a required argument.** ThetaData timestamps are
+  exchange-local `date` + `ms_of_day`, so an instant cannot be derived without
+  a zone. Ambiguous and nonexistent local readings are rejected rather than
+  resolved arbitrarily.
+- **OHLC timestamp meaning is a required argument.** The vendor's convention is
+  not documented to a standard worth assuming, and misreading it would shift
+  every bar by one interval.
+- **Every trade is `TradeSide.UNKNOWN`** unless the operator supplies a code
+  map, because the archived trade schema publishes no aggressor.
+- Symbol reconciliation was extracted to `file_source.py` and is now shared
+  with the Databento provider rather than duplicated.
+
+No provider is an interface-only stub any more.
+
+### Format verification gate
+
+The decoder was written without inspecting a real ThetaData export, so it is
+marked **experimental and not production-compatible**:
+`provider.verification_status` returns `experimental-unverified`.
+
+- Every vendor assumption is registered and classified in `docs/data-import.md`.
+  **None** is verified by a primary source or a sample file; all are inferred,
+  or explicitly unknown and converted into required operator declarations.
+- The repository's ThetaData tests do not count as vendor verification — they
+  were written from the implementation.
+- A read-only inspector settles the assumptions against a real file:
+  `python -m quant_research_terminal.data_import.providers.thetadata_inspection FILE`.
+  It reports observations only, and never guesses or repairs.
+- No vendor market data is committed.
+
+**Real sample files are still required** before this provider can be relied on.
+
 ## Later phases (gated)
 
 Deterministic replay, strategy APIs, execution simulation, experiments, and

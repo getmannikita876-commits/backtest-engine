@@ -30,8 +30,17 @@ from quant_research_terminal.data_import.providers.provider import (
     ProviderRequest,
     RecordStream,
 )
+from quant_research_terminal.data_import.providers.thetadata_decoding import (
+    BarTimestampMeaning,
+    ThetaDataSchema,
+)
+
+# thetadata_inspection is deliberately NOT re-exported. It is an operator
+# diagnostic rather than pipeline API, and importing it here would also make
+# `python -m ...thetadata_inspection` emit a runpy double-import warning.
 from quant_research_terminal.data_import.providers.thetadata_provider import (
     ThetaDataMarketDataProvider,
+    thetadata_record_type,
 )
 
 # Re-exported for convenience: RawRecord is the providers' output type, but it
@@ -41,6 +50,7 @@ from quant_research_terminal.data_import.raw_record import RawRecord
 
 __all__ = [
     "KNOWN_TRADE_SIDES",
+    "BarTimestampMeaning",
     "CsvMarketDataProvider",
     "DatabentoMarketDataProvider",
     "DatabentoSchema",
@@ -56,6 +66,8 @@ __all__ = [
     "RecordStream",
     "SubMicrosecondPolicy",
     "ThetaDataMarketDataProvider",
+    "ThetaDataSchema",
     "bar_availability_timestamp",
     "databento_record_type",
+    "thetadata_record_type",
 ]
