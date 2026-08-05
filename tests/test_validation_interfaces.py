@@ -68,6 +68,29 @@ def _record(source_index: int = 0, **overrides: object) -> RawRecord:
     )
 
 
+def _quote_record(source_index: int = 0, **overrides: object) -> RawRecord:
+    """Build a quote record.
+
+    Duplicate-detection tests use quotes because trades deliberately have no
+    attribute-based identity — see ADR-003.
+    """
+    fields: dict[str, Any] = {
+        "timestamp": BASE_TIME,
+        "instrument_symbol": "ES",
+        "bid": Decimal("5000.00"),
+        "ask": Decimal("5000.25"),
+        "bid_size": Decimal("1"),
+        "ask_size": Decimal("1"),
+    }
+    fields.update(overrides)
+    return RawRecord(
+        record_type=ImportRecordType.QUOTE,
+        source_index=source_index,
+        provider_name="test",
+        fields=fields,
+    )
+
+
 def _codes(issues: tuple[Any, ...]) -> list[str]:
     return [issue.code.value for issue in issues]
 
@@ -234,7 +257,7 @@ def test_timestamp_validator_defers_to_schema_when_field_absent() -> None:
 
 
 def test_duplicate_validator_reports_repeated_identity() -> None:
-    issues = DuplicateValidator().validate([_record(0), _record(1)])
+    issues = DuplicateValidator().validate([_quote_record(0), _quote_record(1)])
 
     assert _codes(issues) == ["duplicate_row"]
     assert issues[0].row_index == 1
@@ -243,7 +266,8 @@ def test_duplicate_validator_reports_repeated_identity() -> None:
 
 
 def test_duplicate_validator_accepts_records_differing_in_any_field() -> None:
-    assert DuplicateValidator().validate([_record(0), _record(1, side="sell")]) == ()
+    differing = _quote_record(1, ask=Decimal("5000.50"))
+    assert DuplicateValidator().validate([_quote_record(0), differing]) == ()
 
 
 def test_duplicate_validator_treats_same_timestamp_different_price_as_distinct() -> None:

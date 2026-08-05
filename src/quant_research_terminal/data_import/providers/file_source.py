@@ -13,7 +13,8 @@ knows the vendor.
 from __future__ import annotations
 
 import csv
-from collections.abc import Generator, Mapping
+from collections import Counter
+from collections.abc import Generator, Mapping, Sequence
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -47,10 +48,14 @@ def iter_delimited_rows(
     The caller owns the returned generator: the file handle is released when it
     is exhausted, closed, or an exception propagates out of it.
 
+    Column names are matched literally and case-sensitively, so ``price`` and
+    ``Price`` are different columns rather than a duplicate pair.
+
     Raises:
-        ProviderDecodeError: if the file has no header row, or a data row's
-            column count disagrees with the header. Both make the row-to-column
-            mapping ambiguous, so no per-row diagnosis would be meaningful.
+        ProviderDecodeError: if the file has no header row, if the header
+            repeats a column name, or if a data row's column count disagrees
+            with the header. All three make the row-to-column mapping
+            ambiguous, so no per-row diagnosis would be meaningful.
     """
     with path.open("r", encoding=encoding, newline="") as handle:
         reader = csv.reader(handle)
@@ -58,12 +63,35 @@ def iter_delimited_rows(
         if header is None:
             raise ProviderDecodeError(f"{path} contains no header row")
 
+        _reject_duplicate_columns(path, header)
+
         for source_index, row in enumerate(reader):
             if len(row) != len(header):
                 raise ProviderDecodeError(
                     f"{path} row {source_index} has {len(row)} columns, expected {len(header)}"
                 )
             yield source_index, dict(zip(header, row, strict=True))
+
+
+def _reject_duplicate_columns(path: Path, header: Sequence[str]) -> None:
+    """Reject a header that repeats a column name.
+
+    Rows are assembled by pairing header names with cell values, so a repeated
+    name would collapse to whichever column appeared last: the earlier column's
+    values would be discarded silently, and the resulting record would still
+    carry exactly the expected field names, so strict field validation could
+    not detect the loss. The row would import cleanly with the wrong value.
+
+    Silently renaming or dropping one of the columns would be a repair. The
+    file's shape is genuinely ambiguous, so it is refused instead.
+    """
+    counts = Counter(header)
+    duplicated = sorted(name for name, count in counts.items() if count > 1)
+    if duplicated:
+        raise ProviderDecodeError(
+            f"{path} has duplicate column names: {', '.join(repr(name) for name in duplicated)}; "
+            f"column names must be unique because rows are matched to columns by name"
+        )
 
 
 def require_non_blank_symbol(symbol: str, label: str) -> str:
