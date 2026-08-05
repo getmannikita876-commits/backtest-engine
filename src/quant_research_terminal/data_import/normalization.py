@@ -26,6 +26,7 @@ validators used, so the two stages cannot drift apart.
 
 from __future__ import annotations
 
+from datetime import timedelta
 from typing import Protocol, runtime_checkable
 
 from quant_research_terminal.data_import.contracts import ImportRecordType
@@ -33,10 +34,11 @@ from quant_research_terminal.data_import.numeric_semantics import to_decimal
 from quant_research_terminal.data_import.raw_record import RawRecord
 from quant_research_terminal.data_import.record_fields import (
     INSTRUMENT_FIELD,
+    INTERVAL_FIELD,
     TIMESTAMP_FIELD,
 )
 from quant_research_terminal.data_import.time_semantics import require_utc
-from quant_research_terminal.domain.models import Bar, Quote, Trade
+from quant_research_terminal.domain.models import Bar, Quote, Trade, parse_trade_side
 
 DomainRecord = Trade | Quote | Bar
 
@@ -81,7 +83,7 @@ class DefaultRecordNormalizer:
             timestamp=require_utc(record.value(TIMESTAMP_FIELD)),
             price=to_decimal(record.value("price")),
             size=to_decimal(record.value("size")),
-            side=str(record.value("side")),
+            side=parse_trade_side(record.value("side")),
         )
 
     def _quote(self, record: RawRecord) -> Quote:
@@ -95,9 +97,17 @@ class DefaultRecordNormalizer:
         )
 
     def _bar(self, record: RawRecord) -> Bar:
+        # The record carries availability time; the domain stores interval
+        # start. The two differ by exactly the interval, so the conversion is
+        # lossless in both directions.
+        availability_time = require_utc(record.value(TIMESTAMP_FIELD))
+        interval = record.value(INTERVAL_FIELD)
+        if not isinstance(interval, timedelta):
+            raise ValueError("bar interval must be a timedelta")
         return Bar(
             instrument_symbol=self._symbol(record),
-            timestamp=require_utc(record.value(TIMESTAMP_FIELD)),
+            interval_start=availability_time - interval,
+            interval=interval,
             open=to_decimal(record.value("open")),
             high=to_decimal(record.value("high")),
             low=to_decimal(record.value("low")),

@@ -62,6 +62,7 @@ def _bar_row(**overrides: object) -> dict[str, Any]:
     row: dict[str, Any] = {
         "timestamp": BASE_TIME,
         "instrument_symbol": "ES",
+        "interval": timedelta(minutes=1),
         "open": Decimal("4999.50"),
         "high": Decimal("5002.00"),
         "low": Decimal("4998.75"),
@@ -420,9 +421,9 @@ def test_accepted_batch_output_uses_the_ordering_key() -> None:
     batch = ImportBatch(
         record_type=ImportRecordType.TRADE,
         rows=(
-            _trade_row(timestamp=BASE_TIME + timedelta(seconds=2), side="third"),
-            _trade_row(timestamp=BASE_TIME, side="first"),
-            _trade_row(timestamp=BASE_TIME + timedelta(seconds=1), side="second"),
+            _trade_row(timestamp=BASE_TIME + timedelta(seconds=2), price=Decimal("3")),
+            _trade_row(timestamp=BASE_TIME, price=Decimal("1")),
+            _trade_row(timestamp=BASE_TIME + timedelta(seconds=1), price=Decimal("2")),
         ),
     )
 
@@ -430,4 +431,4 @@ def test_accepted_batch_output_uses_the_ordering_key() -> None:
     trades = [record for record in accepted if isinstance(record, Trade)]
 
     assert report.success is True
-    assert [trade.side for trade in trades] == ["first", "second", "third"]
+    assert [trade.price for trade in trades] == [Decimal("1"), Decimal("2"), Decimal("3")]

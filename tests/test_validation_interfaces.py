@@ -25,7 +25,7 @@ from quant_research_terminal.data_import import (
     raw_records_to_import_batch,
     validate_import_batch,
 )
-from quant_research_terminal.domain.models import Trade
+from quant_research_terminal.domain.models import Trade, parse_trade_side
 
 BASE_TIME = datetime(2024, 1, 2, 12, 0, 0, tzinfo=UTC)
 
@@ -375,7 +375,7 @@ class _TradeNormalizer:
             timestamp=record.value("timestamp"),
             price=record.value("price"),
             size=record.value("size"),
-            side=str(record.value("side")),
+            side=parse_trade_side(record.value("side")),
         )
 
 

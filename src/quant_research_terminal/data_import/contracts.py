@@ -61,6 +61,8 @@ class ValidationIssueCode(StrEnum):
     NON_DECIMAL_PRICE = "non_decimal_price"
     BID_ASK_INVERSION = "bid_ask_inversion"
     INVALID_OHLC = "invalid_ohlc"
+    INVALID_BAR_INTERVAL = "invalid_bar_interval"
+    INVALID_TRADE_SIDE = "invalid_trade_side"
     DUPLICATE_ROW = "duplicate_row"
     DESCENDING_TIMESTAMP = "descending_timestamp"
     AMBIGUOUS_TIMESTAMP_ORDER = "ambiguous_timestamp_order"

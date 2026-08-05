@@ -14,6 +14,10 @@ UI -> Application -> Data Import -> Storage -> Domain
 
 - **Domain** (`domain/`) — immutable models with validation only: no IO, no GUI,
   no provider-specific code. It is the foundation and depends on nothing above it.
+  Where an invariant can be made structural it is: a bar's availability time is
+  a derived property rather than a stored field, so a bar that would be visible
+  before its interval closes cannot be constructed at all. Closed vocabularies
+  are enums (`TradeSide`), not strings.
 - **Storage** (`data/`) — storage contracts only. Converts domain models into
   deterministic Arrow/Polars-compatible rows with explicit schema metadata and
   fixed-point decimal encoding. See `docs/data-contracts.md`.
@@ -54,9 +58,11 @@ archived file to be the reproducible unit of research input. A future vendor
 SDK may be an optional dependency confined to its own provider package; the
 engine still depends only on `MarketDataProvider`.
 
-Bars carry information-availability time rather than interval start, so a
-completed bar cannot be observed before its interval closes. See
-`docs/adr/ADR-002-bar-availability-time.md`.
+Bars carry both temporal coordinates — `interval_start` and `interval` — and
+derive availability time from them, so a completed bar cannot be observed
+before its interval closes. See `docs/adr/ADR-002-bar-availability-time.md`.
+Storage is at `SCHEMA_VERSION = 2`; version-1 data is rejected rather than
+migrated, because a version-1 bar records no interval.
 
 ## Research invariants
 

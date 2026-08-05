@@ -31,7 +31,7 @@ issues for one defect.
 from __future__ import annotations
 
 from collections.abc import Sequence
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Final, Protocol, runtime_checkable
 
@@ -43,12 +43,17 @@ from quant_research_terminal.data_import.contracts import (
 )
 from quant_research_terminal.data_import.numeric_semantics import is_decimal_like, to_decimal
 from quant_research_terminal.data_import.raw_record import RawRecord
-from quant_research_terminal.data_import.record_fields import TIMESTAMP_FIELD, required_fields
+from quant_research_terminal.data_import.record_fields import (
+    INTERVAL_FIELD,
+    TIMESTAMP_FIELD,
+    required_fields,
+)
 from quant_research_terminal.data_import.time_semantics import (
     TimestampStatus,
     classify_timestamp,
     status_message,
 )
+from quant_research_terminal.domain.models import parse_trade_side
 
 #: Maps a failing timestamp status onto the issue code reported for it.
 #:
@@ -280,6 +285,19 @@ class ValueValidator:
             return self._size_issue(record, "size must be a Decimal", "size")
         if to_decimal(size) <= 0:
             return self._size_issue(record, "size must be positive", "size")
+
+        try:
+            parse_trade_side(record.value("side"))
+        except ValueError as exc:
+            # Reported here so an unrecognised vendor code is a diagnosable
+            # rejection rather than a raw model error during normalization.
+            return _issue(
+                severity=ValidationSeverity.ERROR,
+                code=ValidationIssueCode.INVALID_TRADE_SIDE,
+                message=str(exc),
+                row_index=record.source_index,
+                field_name="side",
+            )
         return None
 
     def _quote_issue(self, record: RawRecord) -> ValidationIssue | None:
@@ -310,6 +328,14 @@ class ValueValidator:
         return None
 
     def _bar_issue(self, record: RawRecord) -> ValidationIssue | None:
+        interval = record.value(INTERVAL_FIELD)
+        if not isinstance(interval, timedelta):
+            return self._interval_issue(record, "interval must be a timedelta")
+        if interval <= timedelta(0):
+            # A non-positive interval would place the bar's availability at or
+            # before its own start, reintroducing look-ahead.
+            return self._interval_issue(record, "interval must be strictly positive")
+
         raw_values = [record.value(field) for field in _OHLC_FIELDS]
         if not all(is_decimal_like(value) for value in raw_values):
             return self._value_issue(record, "bar fields must be Decimal values", "open")
@@ -343,6 +369,16 @@ class ValueValidator:
             message=message,
             row_index=record.source_index,
             field_name=field_name,
+        )
+
+    @staticmethod
+    def _interval_issue(record: RawRecord, message: str) -> ValidationIssue:
+        return _issue(
+            severity=ValidationSeverity.ERROR,
+            code=ValidationIssueCode.INVALID_BAR_INTERVAL,
+            message=message,
+            row_index=record.source_index,
+            field_name=INTERVAL_FIELD,
         )
 
     @staticmethod

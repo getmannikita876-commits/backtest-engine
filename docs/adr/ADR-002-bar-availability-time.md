@@ -1,7 +1,8 @@
 # ADR-002: Bar timestamps carry information-availability time
 
-- Status: Accepted for the import layer; **Proposed** for the domain contract change in "Future work"
+- Status: **Accepted** — import layer (Phase 1.4) and domain/storage contract (Phase 1.5)
 - Date: 2026-08-05
+- Revised: 2026-08-05 (Phase 1.5 — the proposed contract change was accepted, with one revision)
 - Supersedes: nothing
 - Related: `docs/replay_rules.md`, `docs/data-import.md`, `docs/data-contracts.md`
 
@@ -103,40 +104,90 @@ Positive:
 - Replay inherits correct ordering for free, because the ordering key already
   reads `Bar.timestamp`.
 
-Negative — and these are the reason the domain change below is proposed:
+Negative — these were the reason the domain change was proposed, and Phase 1.5
+resolved the first two:
 
-- **Interval start is no longer directly readable from a `Bar`.** It is
-  recoverable only if the consumer knows the interval, which the `Bar` does not
-  carry. Charting or reporting code that wants to label a bar by its opening
-  time must obtain the interval separately.
-- **A `Bar` does not record its own duration**, so two bars of different
-  intervals are indistinguishable once imported.
+- ~~**Interval start is no longer directly readable from a `Bar`.**~~ Resolved:
+  `Bar.interval_start` is now a stored field.
+- ~~**A `Bar` does not record its own duration.**~~ Resolved: `Bar.interval` is
+  now a stored field.
 - **The stored timestamp differs from the vendor's**, which will surprise
-  anyone reconciling imported data against a raw export. This is documented in
-  `docs/data-import.md`, but documentation is weaker than a contract.
+  anyone reconciling imported data against a raw export. Still true, but now
+  self-explaining: the bar carries the interval, so the vendor's original
+  interval-start value is readable directly rather than needing to be derived.
 
-## Future work (proposed, not accepted)
+## Phase 1.5 revision — domain contract accepted
 
-The clean fix is to make both coordinates explicit in the domain contract. The
-smallest change that resolves every negative consequence above:
+The proposed contract change is **accepted**, with one revision that
+strengthens it.
+
+### What was proposed
 
 ```
 Bar:
-    interval_start: datetime   # the period the bar describes
-    interval: timedelta        # how long that period is
-    timestamp:  datetime       # availability time; == interval_start + interval
+    interval_start: datetime
+    interval: timedelta
+    timestamp: datetime        # availability; == interval_start + interval
 ```
 
-This requires:
+### What was adopted, and why it differs
 
-- a domain-model change in `quant_research_terminal.domain.bar`;
-- a storage schema revision and a `SCHEMA_VERSION` bump, since two columns are
-  added (`docs/data-contracts.md` accepts only exactly-matching versions);
-- a migration decision for any data already persisted under version 1.
+Storing `timestamp` as a *field* would have left the invariant
+`timestamp == interval_start + interval` enforceable only by validation — and a
+validated invariant is one a future refactor can weaken. The requirement was
+that look-ahead be impossible *by construction*.
 
-Because that touches an audited Phase 1.1 contract and the Phase 1.2 storage
-schema, it must be accepted as its own decision rather than folded into a
-provider change. This ADR records the proposal; adopting it is a separate ADR.
+`availability_time` is therefore a **derived property**, not a stored field:
 
-Until then, the import-layer decision above stands, and consumers must treat
-`Bar.timestamp` as availability time.
+```
+Bar:
+    interval_start: datetime    # stored, UTC-validated
+    interval: timedelta         # stored, strictly positive
+    interval_end     -> property: interval_start + interval
+    availability_time -> property: interval_end
+    timestamp         -> property: availability_time   (alias)
+```
+
+There is now no field in which a wrong availability could be placed. A bar that
+becomes visible before its interval closes is not invalid — it is
+unconstructible. `_BaseDomainModel` sets `extra="forbid"`, so a caller still
+passing `timestamp=` raises rather than having the argument silently ignored.
+
+`timestamp` remains as an alias so every market event — trade, quote, bar —
+answers one name with "when this became knowable", and replay ordering reads it
+uniformly.
+
+### Storage
+
+`SCHEMA_VERSION` moves from 1 to 2. The bar schema gains
+`interval_microseconds` (`uint64`); `timestamp` continues to hold availability
+time. Interval start is **not** stored, because it is exactly
+`timestamp - interval` and persisting both would let the two disagree.
+
+Intervals are encoded as whole microseconds. `timedelta` is already
+microsecond-resolution, so the encoding is exact and needs no rounding rule —
+the same "no silent precision loss" principle the fixed-point price rules
+follow.
+
+### Migration impact
+
+Version-1 data is **rejected, not migrated**. `validate_storage_schema` accepts
+only an exact version match, so a version-1 file fails loudly.
+
+This is deliberate. A version-1 bar records no interval, so its single
+timestamp cannot be resolved into interval start and availability without
+knowing the bar's duration — and that duration is not recoverable from the row.
+Any automatic migration would have to guess it, which would silently
+reintroduce the exact bias this ADR exists to prevent.
+
+No production data exists at version 1; the storage layer has never been used
+outside tests. Should version-1 data need recovery, the operator must supply
+the interval explicitly, which is a deliberate act with a recorded value rather
+than an inference.
+
+### Consequences of the revision
+
+The negative consequences listed above are resolved: interval start and
+duration are both first-class, and bars of different intervals are
+distinguishable. The remaining limitation is unchanged and unresolved: the
+nominal session close is still calendar-unaware.
