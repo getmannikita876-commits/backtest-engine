@@ -47,6 +47,17 @@ The approved import rules — stream ownership, batch-fatal schema versions,
 timestamp semantics, quantity positivity, duplicate handling, and the complete
 event ordering key — are recorded in `docs/data-import.md`.
 
+Vendor coverage is deliberately narrow. The Databento provider decodes
+**archived delimited exports only**: no binary DBN, no API acquisition, no
+credentials. Keeping acquisition out of the import layer is what allows an
+archived file to be the reproducible unit of research input. A future vendor
+SDK may be an optional dependency confined to its own provider package; the
+engine still depends only on `MarketDataProvider`.
+
+Bars carry information-availability time rather than interval start, so a
+completed bar cannot be observed before its interval closes. See
+`docs/adr/ADR-002-bar-availability-time.md`.
+
 ## Research invariants
 
 Market timestamps, exchange calendars, dataset provenance, configuration

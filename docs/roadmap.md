@@ -35,18 +35,57 @@ Delivered so far — the **provider and validation foundation only**:
 
 Explicitly **not** implemented in this phase:
 
-- Real Databento and ThetaData integrations. Both modules are interface-only
-  stubs with no credentials, no network calls, and no vendor SDK dependency.
+- Real vendor integrations. Both vendor modules were interface-only stubs with
+  no credentials, no network calls, and no vendor SDK dependency.
 - Options records, which require new domain contracts first.
 
 The approved import rules are documented in `docs/data-import.md`.
 
-Remaining before Phase 1.3 can be considered complete:
+Remaining before the import foundation can be considered complete:
 
 - A provider registry and configuration-driven selection, with credentials
   sourced from the environment and never from source control
 - A richer instrument identity to support futures contract rolls
 - A validation report for the streaming path
+
+## Phase 1.4 — Databento archived delimited export decoding (in progress)
+
+This phase implements **one narrow capability**, not a general Databento
+integration:
+
+| Capability | Status |
+| --- | --- |
+| Archived delimited (CSV) export decoding | **implemented** |
+| Binary DBN decoding | not implemented |
+| Historical API acquisition | not implemented |
+| Live API acquisition | not implemented |
+| Credential management | not implemented |
+
+Delivered:
+
+- Decoding of archived Databento delimited exports into raw records
+- Vendor field semantics isolated in a pure, independently testable module
+- Approved rules: `ts_recv` default to avoid look-ahead bias, bar timestamps
+  carrying interval-close availability time (ADR-002), explicit
+  sub-microsecond precision policy, strict symbology with conflict detection,
+  sentinel handling, and no guessing of an unattributed trade side
+- Shared file-reading plumbing extracted so providers do not duplicate it
+
+Not implemented, with reasons:
+
+- **Acquisition of any kind.** A live API cannot be deterministic, so it would
+  break replay reproducibility. Acquisition is a legitimate future component
+  that belongs outside deterministic decoding.
+- **Binary DBN.** It would need the vendor SDK, which is absent here, so any
+  decoder written against it would ship unverified. This is a practical
+  constraint, not an architectural one — a future DBN backend may use the SDK
+  as an **optional dependency isolated inside the Databento provider package**
+  without compromising provider independence.
+- **ThetaData**, which remains an interface-only stub.
+
+Open contract question: ADR-002 proposes adding `interval_start` and `interval`
+to the domain `Bar` so both temporal coordinates are explicit. Adopting it
+requires a storage schema revision and is a separate decision.
 
 ## Later phases (gated)
 

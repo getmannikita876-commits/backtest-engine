@@ -26,7 +26,6 @@ ambiguous and no per-row diagnosis is meaningful.
 
 from __future__ import annotations
 
-import csv
 from collections.abc import Generator
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
@@ -34,22 +33,20 @@ from pathlib import Path
 from typing import Any, Final
 
 from quant_research_terminal.data_import.contracts import ImportRecordType
+from quant_research_terminal.data_import.providers.file_source import (
+    is_excluded_by_request,
+    iter_delimited_rows,
+)
 from quant_research_terminal.data_import.providers.provider import (
     ProviderCapabilities,
     ProviderCapabilityError,
-    ProviderDecodeError,
     ProviderRequest,
     RecordStream,
 )
 from quant_research_terminal.data_import.raw_record import RawRecord
 from quant_research_terminal.data_import.record_fields import (
-    INSTRUMENT_FIELD,
     TIMESTAMP_FIELD,
     decimal_fields,
-)
-from quant_research_terminal.data_import.time_semantics import (
-    TimestampStatus,
-    classify_timestamp,
 )
 
 DEFAULT_PROVIDER_NAME: Final = "csv"
@@ -140,31 +137,17 @@ class CsvMarketDataProvider:
         return RecordStream(self._iter_records(request))
 
     def _iter_records(self, request: ProviderRequest) -> Generator[RawRecord, None, None]:
-        with self._path.open("r", encoding=self._encoding, newline="") as handle:
-            reader = csv.reader(handle)
-            header = next(reader, None)
-            if header is None:
-                raise ProviderDecodeError(f"{self._path} contains no header row")
+        for source_index, row in iter_delimited_rows(self._path, encoding=self._encoding):
+            fields = {name: self._decode(name, text) for name, text in row.items()}
+            if is_excluded_by_request(fields, request):
+                continue
 
-            for source_index, row in enumerate(reader):
-                if len(row) != len(header):
-                    raise ProviderDecodeError(
-                        f"{self._path} row {source_index} has {len(row)} columns, "
-                        f"expected {len(header)}"
-                    )
-
-                fields = {
-                    name: self._decode(name, text) for name, text in zip(header, row, strict=True)
-                }
-                if self._is_excluded(fields, request):
-                    continue
-
-                yield RawRecord(
-                    record_type=self._record_type,
-                    source_index=source_index,
-                    provider_name=self._provider_name,
-                    fields=fields,
-                )
+            yield RawRecord(
+                record_type=self._record_type,
+                source_index=source_index,
+                provider_name=self._provider_name,
+                fields=fields,
+            )
 
     def _decode(self, field_name: str, text: str) -> Any:
         if field_name == TIMESTAMP_FIELD:
@@ -178,17 +161,3 @@ class CsvMarketDataProvider:
             except InvalidOperation:
                 return text
         return text
-
-    def _is_excluded(self, fields: dict[str, Any], request: ProviderRequest) -> bool:
-        symbol = fields.get(INSTRUMENT_FIELD)
-        if isinstance(symbol, str) and symbol != request.instrument_symbol:
-            return True
-
-        timestamp = fields.get(TIMESTAMP_FIELD)
-        if classify_timestamp(timestamp) is not TimestampStatus.VALID:
-            # Undecodable timestamps are a validation concern, not a filter
-            # concern. Keep the row so the defect is reported.
-            return False
-        if not isinstance(timestamp, datetime):
-            return False
-        return not request.contains(timestamp)
