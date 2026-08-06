@@ -1,0 +1,59 @@
+# Line-ending policy (Phase 1.8C, ADR-008).
+#
+# The repository stores LF for every text file — this was already true for all
+# tracked files before this file existed, so introducing it rewrites nothing.
+# Text files also check out as LF on every platform. The project is
+# Windows-primary, but every tool in the stack (Python, Ruff, MyPy, Pytest,
+# modern editors) handles LF transparently, and a single working-tree encoding
+# means test fixtures and hashed artifacts have identical bytes on Windows and
+# Ubuntu CI. Only formats that genuinely expect CRLF (Windows shell scripts)
+# are checked out as CRLF.
+#
+# Developer-facing consequences:
+# - Git's "LF will be replaced by CRLF" warnings disappear for governed files:
+#   explicit attributes override core.autocrlf.
+# - Working trees checked out before this file keep their existing endings
+#   until a file is re-checked out; that skew is cosmetic and does not show up
+#   in `git status` or diffs, because comparison happens on normalized content.
+#   A fresh clone, or `git checkout -- <path>` on a file, yields the declared
+#   endings.
+
+# Default: auto-detect text, store LF, check out LF.
+* text=auto eol=lf
+
+# Explicit text types (documentation of intent; all inherit LF).
+*.py      text eol=lf
+*.pyi     text eol=lf
+*.md      text eol=lf
+*.yml     text eol=lf
+*.yaml    text eol=lf
+*.toml    text eol=lf
+*.json    text eol=lf
+*.csv     text eol=lf
+*.txt     text eol=lf
+*.sh      text eol=lf
+.gitignore     text eol=lf
+.gitattributes text eol=lf
+.env.example   text eol=lf
+
+# Windows shell scripts are the one genuine CRLF case: cmd.exe mis-parses some
+# LF-only batch constructs, and CRLF is the PowerShell convention.
+*.ps1  text eol=crlf
+*.bat  text eol=crlf
+*.cmd  text eol=crlf
+
+# Binary: never translated, never diffed as text.
+*.parquet binary
+*.dbn     binary
+*.zst     binary
+*.png     binary
+*.jpg     binary
+*.jpeg    binary
+*.gif     binary
+*.ico     binary
+*.svg     text eol=lf
+*.zip     binary
+*.gz      binary
+*.tar     binary
+*.7z      binary
+*.whl     binary

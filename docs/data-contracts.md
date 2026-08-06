@@ -236,15 +236,21 @@ back through PyArrow's `as_py()` resolves that name through `zoneinfo`, which
 requires the `tzdata` package — absent on a stock Windows install, where it
 raises `ZoneInfoNotFoundError` for the name `UTC` itself.
 
-Rather than take a dependency to convert a value already known to be UTC, the
-store reads the underlying microsecond count and rebuilds the `datetime`
-against `datetime.UTC` directly. That is exact, needs no zone database, and
-cannot silently pick up a different zone. The `timestamp_timezone` metadata is
-still validated on read, so the file's own claim is checked.
+Rather than depend on zone-name resolution to convert a value already known to
+be UTC, the store reads the underlying microsecond count and rebuilds the
+`datetime` against `datetime.UTC` directly. That is exact, needs no zone
+database, and cannot silently pick up a different zone. The
+`timestamp_timezone` metadata is still validated on read, so the file's own
+claim is checked.
 
-The same limitation applies to Polars: it reads the file's types and values
-correctly, but converting a zone-aware timestamp to a Python object needs
-`tzdata` too.
+Since Phase 1.8C, `tzdata` is additionally a **declared runtime dependency**
+(ADR-008), because every path *other* than this one needs it: PyArrow's
+`as_py()`, Polars scalar access, and Polars `to_dicts()` all resolve the
+schema's zone name through `zoneinfo`, and without an IANA database they fail
+— the Polars dictionary path with a Rust-level panic rather than a catchable
+exception. The reconstruction above is retained as defence in depth: the
+store's own read path works even where zone resolution is broken, and the
+declared dependency makes the ordinary paths work everywhere else.
 
 ### Rejected on read
 

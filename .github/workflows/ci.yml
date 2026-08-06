@@ -41,7 +41,18 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -e ".[dev]"
+          python -m pip install -e ".[dev]" -c constraints.txt
+
+      - name: Report environment
+        # Diagnostics for reproducibility: exactly which interpreter and
+        # resolved package versions this run used, and proof the IANA
+        # timezone database resolves on this runner rather than by accident
+        # of the image (see ADR-008).
+        run: |
+          python --version
+          python -c "import platform; print(platform.platform())"
+          python -m pip freeze
+          python -c "import zoneinfo; print('ZoneInfo UTC:', zoneinfo.ZoneInfo('UTC'))"
 
       - name: Format check
         run: python -m ruff format --check .

@@ -20,3 +20,13 @@ The application can be installed and launched immediately, while later domain mo
 be introduced behind explicit boundaries. PySide6 is an installation dependency even for
 UI smoke tests; headless CI must set `QT_QPA_PLATFORM=offscreen`.
 
+## Addendum (2026-08-06)
+
+"Python 3.11+" above no longer describes the project. The supported version is
+**Python 3.12 exactly** (`requires-python = ">=3.12,<3.13"` in
+`pyproject.toml`): 3.11 was dropped without ever being exercised by CI, and
+3.13 is excluded until it is explicitly tested. Every tool target — Ruff,
+MyPy, the CI matrix — is aligned to 3.12; the alignment and the environment
+reproducibility policy are recorded in ADR-008. The rest of this decision
+(src layout, PySide6 shell, Hatchling, quality gates) stands unchanged.
+
