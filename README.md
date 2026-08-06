@@ -32,17 +32,23 @@ catalogue, no partitioning, and no performance claim.
 ## Requirements
 
 - Windows 10/11
-- Python 3.11 or newer
+- Python 3.12 (`requires-python = ">=3.12,<3.13"`; 3.11 will not install,
+  3.13 is untested and deliberately excluded)
 
 ## Setup and run
 
 ```powershell
-py -3.11 -m venv .venv
+py -3.12 -m venv .venv
 .venv\Scripts\Activate.ps1
 python -m pip install --upgrade pip
-python -m pip install -e ".[dev]"
+python -m pip install -e ".[dev]" -c constraints.txt
 quant-research-terminal
 ```
+
+`constraints.txt` pins the exact version of every package in the supported
+environment, so two installs from the same commit resolve identically. See
+`docs/adr/ADR-008-environment-reproducibility.md` for the policy and the
+regeneration procedure.
 
 Alternative launch:
 
@@ -53,11 +59,27 @@ python -m quant_research_terminal
 ## Verification
 
 ```powershell
-python -m pip install -e ".[dev]"
+python -m pip install -e ".[dev]" -c constraints.txt
 python -m pytest
 python -m ruff check .
 python -m mypy src tests
 ```
+
+## Environment report
+
+When reporting a defect or recording an experiment environment, capture:
+
+```powershell
+python -c "import sys, platform; print(sys.version); print(platform.platform())"
+python -m pip freeze
+python -c "import zoneinfo; print(zoneinfo.ZoneInfo('UTC'))"
+git rev-parse HEAD
+```
+
+The third line verifies the IANA timezone database is available — required for
+materializing the storage layer's UTC timestamps through PyArrow or Polars.
+The Git command is optional context, not a runtime dependency; the application
+never invokes Git.
 
 See `PROJECT_CHARTER.md`, `docs/architecture.md`, `docs/roadmap.md`, and
 `docs/adr/ADR-001-project-foundation.md` for scope and architectural decisions.

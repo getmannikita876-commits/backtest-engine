@@ -258,6 +258,30 @@ missed. See ADR-005 (**Accepted**).
   unconstructible.
 - No schema change; identity and conflict are import-validation concepts.
 
+## Phase 1.8C — Environment and reproducibility hardening (in progress)
+
+Closes the audit-confirmed gap that the environment was the least reproducible
+part of a reproducibility platform. See ADR-008 (**Accepted**).
+
+- **`tzdata` declared as an unconditional runtime dependency.** Reproduced
+  first: on a clean Windows environment `ZoneInfo("UTC")` raised, PyArrow
+  `as_py()` failed, and Polars `to_dicts()` panicked at the Rust level while
+  materializing the repository's own stored timestamps. The storage layer's
+  microsecond-count reconstruction is retained as defence in depth.
+- **Python 3.12 everywhere.** Ruff `target-version` corrected from `py311`;
+  README and ADR-001 corrected from "3.11+"; a regression test now asserts
+  the interpreter, `requires-python`, and every tool target agree.
+- **`constraints.txt`**: exact version pins for the whole environment,
+  consumed by developers and CI (`pip install -e ".[dev]" -c
+  constraints.txt`). Version-exact, not hash-exact — stated honestly in
+  ADR-008; hash locking is future work.
+- **`.gitattributes`**: LF in repository and working tree (CRLF only for
+  Windows shell scripts, binary formats protected). Introduced with zero
+  rewritten blobs — the index already stored LF everywhere.
+- **`py.typed`** marker added and verified present in the built wheel.
+- CI installs through the constraints file and prints interpreter, platform,
+  frozen package versions, and timezone-database resolution on both runners.
+
 ## Later phases (gated)
 
 Deterministic replay, strategy APIs, execution simulation, experiments, and
