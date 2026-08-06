@@ -85,6 +85,13 @@ def _apply_duplicate_policy(
     Detection already happened in the validation stage; this only decides which
     copy to keep, using the same :func:`record_identity` definition, so the two
     can never disagree about what a duplicate is.
+
+    Every record reaching here that shares an identity with another is an
+    **exact** duplicate. Conflicting records — same bar identity, differing
+    values — carry a ``CONFLICTING_BAR`` error and were rejected before policy
+    application, so no policy value can pick a winner among disagreeing
+    sources (ADR-005). Collapsing what remains is therefore lossless by
+    construction.
     """
     survivor_positions: dict[tuple[object, ...], int] = {}
     survivors: list[RawRecord] = []

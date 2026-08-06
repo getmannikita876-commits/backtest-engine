@@ -236,6 +236,28 @@ quantity issue codes rather than `non_decimal_price`. Storage raises
 Still open: signed values (PnL, deltas) have no envelope; fractional quantities
 would need a schema change.
 
+## Phase 1.8B — Bar identity and conflict semantics (in progress)
+
+Fixes the audit-confirmed defect that two bars for the same instrument and
+period with *different* OHLCV values were silently accepted, while identical
+copies were correctly flagged — the harmless case caught, the harmful one
+missed. See ADR-005 (**Accepted**).
+
+- **Bar identity is the period**: `(instrument_symbol, interval_start,
+  interval)`. OHLCV values are claims about the period, not part of the
+  identity.
+- **Exact duplicate and conflict are separate concepts.** Identical claims
+  remain a `duplicate_row` warning resolved by `DuplicatePolicy`; differing
+  claims are a `conflicting_bar` **error** on every member of the group, so
+  no copy survives and no policy can pick a winner.
+- Neither copy of a conflict is retained: the layer cannot tell a vendor
+  correction from a stale double-fetch, and guessing would convert a visible
+  contradiction into an invisible bias. Resolution belongs to the operator.
+- Trades remain non-deduplicated (ADR-003 unchanged); quote semantics are
+  unchanged — a quote's identity spans every field, so quote conflicts are
+  unconstructible.
+- No schema change; identity and conflict are import-validation concepts.
+
 ## Later phases (gated)
 
 Deterministic replay, strategy APIs, execution simulation, experiments, and

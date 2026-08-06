@@ -74,6 +74,7 @@ from quant_research_terminal.data_import.time_semantics import (
     require_utc,
 )
 from quant_research_terminal.data_import.validation import (
+    BAR_IDENTITY_FIELDS,
     DuplicateValidator,
     OrderingValidator,
     RecordBatchValidator,
@@ -87,6 +88,7 @@ from quant_research_terminal.data_import.validation import (
 )
 
 __all__ = [
+    "BAR_IDENTITY_FIELDS",
     "EVENT_TYPE_PRECEDENCE",
     "KNOWN_TRADE_SIDES",
     "BarTimestampMeaning",

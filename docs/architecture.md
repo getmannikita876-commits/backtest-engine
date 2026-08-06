@@ -55,8 +55,9 @@ The engine never depends on a specific vendor: every provider satisfies the same
 so resources are released deterministically rather than by garbage collection.
 
 The approved import rules — stream ownership, batch-fatal schema versions,
-timestamp semantics, quantity positivity, duplicate handling, and the complete
-event ordering key — are recorded in `docs/data-import.md`.
+timestamp semantics, quantity positivity, duplicate and bar-conflict handling
+(ADR-005), and the complete event ordering key — are recorded in
+`docs/data-import.md`.
 
 Vendor coverage is deliberately narrow. The Databento and ThetaData providers
 decode **archived delimited exports only**: no binary DBN, no API acquisition,
