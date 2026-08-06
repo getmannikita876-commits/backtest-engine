@@ -27,6 +27,8 @@ import pytest
 from quant_research_terminal.data import (
     BAR_ARROW_SCHEMA,
     MAX_FIXED_POINT_VALUE,
+    MAX_TIMESTAMP_MICROSECONDS,
+    MIN_TIMESTAMP_MICROSECONDS,
     PRICE_QUANTUM,
     SCHEMA_NAME,
     SCHEMA_VERSION,
@@ -554,6 +556,270 @@ def test_missing_file_raises_filesystem_error_not_contract_error(tmp_path: Path)
     # say less than the original.
     with pytest.raises(FileNotFoundError):
         read_trades(tmp_path / "absent.parquet")
+
+
+# ==========================================================================
+# Unrepresentable stored values
+#
+# Arrow holds a timestamp as int64 microseconds and a bar interval as uint64
+# microseconds. Both types span far more than a Python datetime or a derived
+# interval start can represent, so a syntactically valid file can carry a value
+# that cannot be rebuilt. The property under test:
+#
+#     no public function in the storage layer raises OverflowError
+#
+# OverflowError is an ArithmeticError, not a ValueError, so it is not covered
+# incidentally by the handlers that catch malformed values.
+# ==========================================================================
+
+
+def _corrupt_timestamp(path: Path, microseconds: int) -> None:
+    """Rewrite the file's single timestamp with a raw microsecond count.
+
+    The column keeps its declared Arrow type, so the file remains schema-valid
+    and the failure can only come from reconstruction.
+    """
+    table = pq.read_table(path)
+    field = table.schema.field("timestamp")
+    corrupted = table.set_column(
+        table.schema.get_field_index("timestamp"),
+        field,
+        pa.array([microseconds], type=pa.int64()).cast(field.type),
+    )
+    _write_raw(path, corrupted.replace_schema_metadata(table.schema.metadata))
+
+
+def _corrupt_bar_interval(path: Path, microseconds: int) -> None:
+    """Rewrite the file's single bar interval with a raw microsecond count."""
+    table = pq.read_table(path)
+    field = table.schema.field("interval_microseconds")
+    corrupted = table.set_column(
+        table.schema.get_field_index("interval_microseconds"),
+        field,
+        pa.array([microseconds], type=pa.uint64()),
+    )
+    _write_raw(path, corrupted.replace_schema_metadata(table.schema.metadata))
+
+
+def test_timestamp_below_minimum_is_rejected(tmp_path: Path) -> None:
+    path = tmp_path / "trades.parquet"
+    write_trades(path, [_trade()])
+    _corrupt_timestamp(path, MIN_TIMESTAMP_MICROSECONDS - 1)
+
+    with pytest.raises(StorageContractError, match="outside the representable range"):
+        read_trades(path)
+
+
+def test_timestamp_above_maximum_is_rejected(tmp_path: Path) -> None:
+    path = tmp_path / "trades.parquet"
+    write_trades(path, [_trade()])
+    _corrupt_timestamp(path, MAX_TIMESTAMP_MICROSECONDS + 1)
+
+    with pytest.raises(StorageContractError, match="outside the representable range"):
+        read_trades(path)
+
+
+@pytest.mark.parametrize("microseconds", [-(2**63), 2**63 - 1])
+def test_extreme_int64_timestamps_are_rejected(tmp_path: Path, microseconds: int) -> None:
+    # The physical limits of the storage type, which reach some 292 000 years
+    # either side of the epoch.
+    path = tmp_path / "trades.parquet"
+    write_trades(path, [_trade()])
+    _corrupt_timestamp(path, microseconds)
+
+    with pytest.raises(StorageContractError, match="outside the representable range"):
+        read_trades(path)
+
+
+@pytest.mark.parametrize("microseconds", [MIN_TIMESTAMP_MICROSECONDS, MAX_TIMESTAMP_MICROSECONDS])
+def test_timestamps_at_the_representable_bounds_are_accepted(
+    tmp_path: Path, microseconds: int
+) -> None:
+    # The guard must reject only what cannot be rebuilt. A bound that is one
+    # microsecond too tight would silently make legitimate archives unreadable,
+    # which is the failure this test exists to prevent.
+    path = tmp_path / "trades.parquet"
+    write_trades(path, [_trade()])
+    _corrupt_timestamp(path, microseconds)
+
+    (restored,) = read_trades(path)
+
+    expected = datetime(1970, 1, 1, tzinfo=UTC) + timedelta(microseconds=microseconds)
+    assert restored.timestamp == expected
+
+
+def test_quote_timestamp_overflow_is_rejected(tmp_path: Path) -> None:
+    path = tmp_path / "quotes.parquet"
+    write_quotes(path, [_quote()])
+    _corrupt_timestamp(path, MAX_TIMESTAMP_MICROSECONDS + 1)
+
+    with pytest.raises(StorageContractError, match="outside the representable range"):
+        read_quotes(path)
+
+
+def test_bar_timestamp_overflow_is_rejected(tmp_path: Path) -> None:
+    path = tmp_path / "bars.parquet"
+    write_bars(path, [_bar()])
+    _corrupt_timestamp(path, MIN_TIMESTAMP_MICROSECONDS - 1)
+
+    with pytest.raises(StorageContractError, match="outside the representable range"):
+        read_bars(path)
+
+
+def test_bar_interval_overflowing_the_datetime_range_is_rejected(tmp_path: Path) -> None:
+    # UINT64_MAX microseconds is a valid timedelta — roughly 584 000 years — so
+    # the interval decodes cleanly and the failure only appears when interval
+    # start is derived as availability_time - interval. No per-column check can
+    # anticipate it, because it depends on both columns together.
+    path = tmp_path / "bars.parquet"
+    write_bars(path, [_bar()])
+    _corrupt_bar_interval(path, UINT64_MAX)
+
+    with pytest.raises(StorageContractError, match="not a valid bar record"):
+        read_bars(path)
+
+
+def _largest_representable_interval_microseconds() -> int:
+    """Return the widest interval a bar at ``BASE_TIME + ONE_MINUTE`` may carry."""
+    availability = BASE_TIME + ONE_MINUTE
+    return (availability - datetime.min.replace(tzinfo=UTC)) // timedelta(microseconds=1)
+
+
+def test_bar_interval_at_the_representable_limit_is_accepted(tmp_path: Path) -> None:
+    path = tmp_path / "bars.parquet"
+    write_bars(path, [_bar()])
+    _corrupt_bar_interval(path, _largest_representable_interval_microseconds())
+
+    (restored,) = read_bars(path)
+
+    assert restored.interval_start == datetime.min.replace(tzinfo=UTC)
+    assert restored.availability_time == BASE_TIME + ONE_MINUTE
+
+
+def test_bar_interval_one_microsecond_past_the_limit_is_rejected(tmp_path: Path) -> None:
+    path = tmp_path / "bars.parquet"
+    write_bars(path, [_bar()])
+    _corrupt_bar_interval(path, _largest_representable_interval_microseconds() + 1)
+
+    with pytest.raises(StorageContractError, match="not a valid bar record"):
+        read_bars(path)
+
+
+@pytest.mark.parametrize(
+    "microseconds",
+    [
+        -(2**63),
+        MIN_TIMESTAMP_MICROSECONDS - 1,
+        MAX_TIMESTAMP_MICROSECONDS + 1,
+        2**63 - 1,
+    ],
+)
+def test_no_overflow_error_escapes_a_corrupted_timestamp(tmp_path: Path, microseconds: int) -> None:
+    path = tmp_path / "trades.parquet"
+    write_trades(path, [_trade()])
+    _corrupt_timestamp(path, microseconds)
+
+    try:
+        read_trades(path)
+    except StorageContractError:
+        pass
+    except BaseException as error:  # pragma: no cover - the regression itself
+        raise AssertionError(
+            f"read_trades leaked {type(error).__name__}; the storage API contract "
+            f"promises StorageContractError"
+        ) from error
+    else:  # pragma: no cover - the regression itself
+        raise AssertionError("an unrepresentable timestamp was accepted")
+
+
+@pytest.mark.parametrize(
+    "microseconds",
+    [
+        2**63,
+        2**64 - 1,
+        _largest_representable_interval_microseconds() + 1,
+    ],
+)
+def test_no_overflow_error_escapes_a_corrupted_interval(tmp_path: Path, microseconds: int) -> None:
+    path = tmp_path / "bars.parquet"
+    write_bars(path, [_bar()])
+    _corrupt_bar_interval(path, microseconds)
+
+    try:
+        read_bars(path)
+    except StorageContractError:
+        pass
+    except BaseException as error:  # pragma: no cover - the regression itself
+        raise AssertionError(
+            f"read_bars leaked {type(error).__name__}; the storage API contract "
+            f"promises StorageContractError"
+        ) from error
+    else:  # pragma: no cover - the regression itself
+        raise AssertionError("an unrepresentable interval was accepted")
+
+
+# --------------------------------------------------------------------------
+# Write-path symmetry: everything the write path can emit, the read path takes
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "timestamp",
+    [
+        datetime.min.replace(tzinfo=UTC),
+        datetime.max.replace(tzinfo=UTC),
+    ],
+)
+def test_extreme_but_representable_timestamps_round_trip(
+    tmp_path: Path, timestamp: datetime
+) -> None:
+    # The read guard is derived from datetime's own limits, so the extremes a
+    # domain record may legitimately carry must survive persistence.
+    path = tmp_path / "trades.parquet"
+    trade = _trade(timestamp=timestamp)
+
+    write_trades(path, [trade])
+    (restored,) = read_trades(path)
+
+    assert restored == trade
+
+
+def test_written_timestamps_are_always_inside_the_read_range(tmp_path: Path) -> None:
+    # Symmetry stated as a property rather than by example: no datetime exists
+    # outside the bounds the read path enforces, so the write path cannot emit
+    # a value its own reader would refuse.
+    path = tmp_path / "trades.parquet"
+    write_trades(
+        path,
+        [
+            _trade(timestamp=datetime.min.replace(tzinfo=UTC)),
+            _trade(timestamp=BASE_TIME),
+            _trade(timestamp=datetime.max.replace(tzinfo=UTC)),
+        ],
+    )
+    table = pq.read_table(path)
+
+    stored = table.column("timestamp").cast(pa.int64()).to_pylist()
+    assert all(
+        MIN_TIMESTAMP_MICROSECONDS <= value <= MAX_TIMESTAMP_MICROSECONDS for value in stored
+    )
+
+
+def test_bar_availability_time_is_always_representable(tmp_path: Path) -> None:
+    # The domain refuses a bar whose interval pushes availability past the
+    # representable range, so write_bars has no constructible input that would
+    # store an out-of-range timestamp.
+    with pytest.raises(ValueError, match="leaves the representable datetime range"):
+        _bar(
+            interval_start=datetime.max.replace(tzinfo=UTC) - ONE_MINUTE, interval=timedelta(days=1)
+        )
+
+    path = tmp_path / "bars.parquet"
+    bar = _bar(interval_start=datetime.min.replace(tzinfo=UTC), interval=ONE_MINUTE)
+    write_bars(path, [bar])
+
+    (restored,) = read_bars(path)
+    assert restored == bar
 
 
 # ==========================================================================
