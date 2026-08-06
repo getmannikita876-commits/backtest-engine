@@ -101,6 +101,120 @@ Schema metadata fields include:
 - `price_precision`
 - `price_scale`
 
+## Parquet persistence (implemented)
+
+`quant_research_terminal.data.parquet_store` performs the real round trip:
+
+```
+domain records -> Arrow table -> Parquet file -> Arrow table -> domain records
+```
+
+### API
+
+| Function | Purpose |
+| --- | --- |
+| `write_trades` / `read_trades` | Trade files |
+| `write_quotes` / `read_quotes` | Quote files |
+| `write_bars` / `read_bars` | Bar files |
+| `read_schema_metadata` | Inspect a file's contract without reconstructing records |
+
+### One record type per file
+
+A file holds trades, or quotes, or bars — never a mixture. The three Arrow
+schemas have distinct column sets and carry no discriminator field, so a mixed
+file could not be read back without inventing one, and inventing a schema-level
+discriminator would be a contract change. The caller states the expected record
+type by choosing the read function; the file's schema is checked against it.
+
+### Parquet settings
+
+Explicit rather than inherited, so a file can be reproduced when library
+defaults change. Chosen for stability, not speed — performance tuning is out of
+scope.
+
+| Setting | Value | Reason |
+| --- | --- | --- |
+| Compression | `snappy` | Most widely supported codec; lossless, so it cannot affect a value. No compression level applies |
+| Format version | `2.6` | Pinned so layout does not shift with the writing library |
+| Dictionary encoding | disabled | Keeps every column's encoding uniform and the file predictable |
+| Row group size | 65 536 rows | Fixed so grouping does not vary with input size |
+| Statistics | library default | Does not affect values |
+
+### Determinism
+
+**Semantic determinism is guaranteed:** the same records written with the same
+configuration read back as equal records, in the same order. Nothing reads the
+wall clock, generates a random identifier, or depends on dictionary iteration
+order or the Python hash seed.
+
+**Byte identity is verified, but narrowly.** Two writes of the same records
+produce byte-identical files under the pinned PyArrow version, and a test
+asserts it. This is not promised across PyArrow versions: the Parquet footer
+records the writing library's version string.
+
+Row order is preserved exactly. Storage never sorts — ordering is a replay
+concern with its own rules, and reordering here would hide the order the caller
+established.
+
+### Atomic writes
+
+A write goes to `<target>.partial` in the target's own directory, is closed
+completely, and is then moved onto the target with `os.replace`, which is
+atomic on POSIX and for same-volume moves on Windows. The target is therefore
+always either the previous file or the new one, never a truncated one — and a
+truncated Parquet file is indistinguishable from a valid one until it is read.
+
+The temporary name is derived from the target rather than randomised, so a
+failure leaves a predictable artefact rather than a uniquely-named orphan. On
+any failure the temporary file is removed and an existing target is left
+untouched. This is not a transaction system: concurrent writes to the same path
+are not supported.
+
+### Timestamps without a zone database
+
+Arrow stores a timestamp as a microsecond count plus a zone name. Converting one
+back through PyArrow's `as_py()` resolves that name through `zoneinfo`, which
+requires the `tzdata` package — absent on a stock Windows install, where it
+raises `ZoneInfoNotFoundError` for the name `UTC` itself.
+
+Rather than take a dependency to convert a value already known to be UTC, the
+store reads the underlying microsecond count and rebuilds the `datetime`
+against `datetime.UTC` directly. That is exact, needs no zone database, and
+cannot silently pick up a different zone. The `timestamp_timezone` metadata is
+still validated on read, so the file's own claim is checked.
+
+The same limitation applies to Polars: it reads the file's types and values
+correctly, but converting a zone-aware timestamp to a Python object needs
+`tzdata` too.
+
+### Rejected on read
+
+All raise `StorageContractError`, a domain-specific exception, rather than a
+raw Arrow or Parquet error:
+
+- missing schema metadata, or an unsupported schema version;
+- wrong `timestamp_timezone`, `price_scale`, `price_encoding`, or
+  `schema_name` metadata;
+- missing, extra, or reordered columns — including reading a file as the wrong
+  record type;
+- a column whose Arrow type differs from the contract;
+- a null in any column, since every column is required;
+- a corrupted or truncated file;
+- a stored value the domain rejects: an unrecognised `side`, a negative
+  fixed-point price, a non-positive bar interval.
+
+Genuine filesystem failures are **not** wrapped. A missing file raises
+`FileNotFoundError`, whose own message says more than a wrapper would.
+
+Reconstruction goes through the ordinary domain constructors, so every stored
+value is revalidated. Nothing uses `model_construct` or any other route that
+would bypass validation: a file is untrusted input.
+
+### Not implemented
+
+No DuckDB, no dataset catalogue, no partitioning strategy, no caching, no query
+layer, and no performance claim of any kind.
+
 ## Compatibility policy
 
 - Only schema versions that exactly match the current contract are accepted.

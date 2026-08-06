@@ -18,9 +18,13 @@ UI -> Application -> Data Import -> Storage -> Domain
   a derived property rather than a stored field, so a bar that would be visible
   before its interval closes cannot be constructed at all. Closed vocabularies
   are enums (`TradeSide`), not strings.
-- **Storage** (`data/`) — storage contracts only. Converts domain models into
-  deterministic Arrow/Polars-compatible rows with explicit schema metadata and
-  fixed-point decimal encoding. See `docs/data-contracts.md`.
+- **Storage** (`data/`) — storage contracts and Parquet persistence. Converts
+  domain models into deterministic Arrow rows with explicit schema metadata and
+  fixed-point decimal encoding, and reads and writes single-record-type Parquet
+  files (`parquet_store.py`). Writes are atomic; reconstruction goes through the
+  ordinary domain constructors, so a file is treated as untrusted input. There
+  is no catalogue, partitioning, query layer, or DuckDB. See
+  `docs/data-contracts.md`.
 - **Data Import** (`data_import/`) — providers, validation, normalization, and
   the orchestration that sequences them. See `docs/data-import.md`.
 - **UI** (`ui/`) — displays data and starts operations; contains no business

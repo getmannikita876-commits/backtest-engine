@@ -162,6 +162,43 @@ marked **experimental and not production-compatible**:
 
 **Real sample files are still required** before this provider can be relied on.
 
+## Phase 1.7C — Real Arrow/Parquet storage round trip (in progress)
+
+The storage layer now touches real files. Its guarantees were previously
+theoretical; this phase makes them observable.
+
+Delivered — `data/parquet_store.py`:
+
+- `write_trades`/`read_trades`, `write_quotes`/`read_quotes`,
+  `write_bars`/`read_bars`, plus `read_schema_metadata`
+- **One record type per file.** The Arrow schemas carry no discriminator, so a
+  mixed file could not be read back without inventing one
+- **Atomic writes** via a derived `.partial` name plus `os.replace`; an existing
+  target survives a failed write and no orphaned temporary is left behind
+- **Explicit Parquet settings** — snappy, format 2.6, dictionary encoding off,
+  fixed row-group size — documented in `docs/data-contracts.md`
+- **Semantic determinism guaranteed**; byte identity verified for the pinned
+  PyArrow version and not promised beyond it
+- Contract violations raise `StorageContractError` rather than leaking raw
+  Arrow/Parquet errors; genuine filesystem errors keep their own exceptions
+
+Verified by real IO, not by mocks: uint64 maximum, fixed-point maximum,
+microsecond timestamps, all three `TradeSide` values, bar interval and derived
+availability time, row order, and repeated identical trades remaining repeated.
+
+### Findings from doing real IO
+
+- **`tzdata` is absent on this platform**, so PyArrow's and Polars' conversion
+  of a zone-aware timestamp to a Python object raises `ZoneInfoNotFoundError`
+  for the name `UTC` itself. The store reads the microsecond count and rebuilds
+  the `datetime` against `datetime.UTC`, taking no dependency.
+- **Polars compatibility is partial by design.** It reads the written types and
+  values exactly; domain reconstruction from Polars is not implemented and is
+  not claimed.
+
+Not implemented: DuckDB, dataset catalogue, partitioning, caching, query layer,
+performance work.
+
 ## Later phases (gated)
 
 Deterministic replay, strategy APIs, execution simulation, experiments, and
