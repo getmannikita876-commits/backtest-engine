@@ -25,6 +25,8 @@ from quant_research_terminal.data.conversion import (
 )
 from quant_research_terminal.data.parquet_store import (
     COMPRESSION,
+    MAX_TIMESTAMP_MICROSECONDS,
+    MIN_TIMESTAMP_MICROSECONDS,
     PARQUET_VERSION,
     ROW_GROUP_SIZE,
     USE_DICTIONARY,
@@ -52,6 +54,8 @@ __all__ = [
     "BAR_POLARS_SCHEMA",
     "COMPRESSION",
     "MAX_FIXED_POINT_VALUE",
+    "MAX_TIMESTAMP_MICROSECONDS",
+    "MIN_TIMESTAMP_MICROSECONDS",
     "PARQUET_VERSION",
     "PRICE_ENCODING",
     "PRICE_PRECISION",

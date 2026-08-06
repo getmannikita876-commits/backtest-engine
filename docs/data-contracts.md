@@ -260,10 +260,54 @@ raw Arrow or Parquet error:
 - a null in any column, since every column is required;
 - a corrupted or truncated file;
 - a stored value the domain rejects: an unrecognised `side`, a negative
-  fixed-point price, a non-positive bar interval.
+  fixed-point price, a non-positive bar interval;
+- a stored value no `datetime` or `timedelta` can represent — see below.
 
 Genuine filesystem failures are **not** wrapped. A missing file raises
 `FileNotFoundError`, whose own message says more than a wrapper would.
+
+### Unrepresentable stored values
+
+Arrow holds a timestamp as `int64` microseconds and a bar interval as `uint64`
+microseconds. Both span far more than the values the store can rebuild: `int64`
+microseconds reach some 292 000 years either side of the epoch, against a
+`datetime` range of roughly year 1 to year 9999. A file that was not written
+here, or one corrupted after it was, can therefore be perfectly valid Parquet
+and still carry an instant with no Python counterpart.
+
+The guarantee:
+
+> No public function in the storage layer raises `OverflowError`. A stored
+> value that cannot be rebuilt is a contract violation and is reported as
+> `StorageContractError`.
+
+`OverflowError` is an `ArithmeticError`, not a `ValueError`, so it is not
+covered incidentally by handlers that catch malformed values; it is named
+explicitly wherever stored values become `datetime` or `timedelta` objects.
+
+Two guards exist because there are two kinds of failure:
+
+- A **timestamp** has a fixed representable range, independent of every other
+  column. It is range-checked *before* reconstruction, so the error names the
+  column, the row, and the offending value. The bounds are exported as
+  `MIN_TIMESTAMP_MICROSECONDS` and `MAX_TIMESTAMP_MICROSECONDS`, derived from
+  `datetime.min`/`datetime.max` rather than written out, so they cannot drift
+  from the type they describe. They are a property of the Python type, not of
+  the storage schema — no schema version depends on them.
+- A bar's **interval** has no fixed bound. Whether
+  `availability_time - interval` is representable depends on both columns
+  together, so no per-column check can decide it. That arithmetic is allowed to
+  fail and its `OverflowError` is translated at the boundary. A `uint64`
+  interval of roughly 584 000 years decodes to a valid `timedelta` and only
+  fails when interval start is derived.
+
+**Write-path symmetry.** Every value the write path can emit, the read path
+accepts. A `datetime` has no value outside the bounds the reader enforces, and
+the domain already refuses a bar whose interval pushes availability past the
+representable range, so no constructible record can produce a file this store
+would then refuse. The write path nonetheless converts `OverflowError` to
+`StorageContractError` as well: making the API's guarantee depend on that
+coincidence would hold only until the domain widened.
 
 Reconstruction goes through the ordinary domain constructors, so every stored
 value is revalidated. Nothing uses `model_construct` or any other route that

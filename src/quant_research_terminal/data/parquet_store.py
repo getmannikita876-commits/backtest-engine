@@ -43,6 +43,38 @@ module reads the underlying microsecond count and rebuilds the ``datetime``
 against :data:`datetime.UTC` directly. That is exact, needs no zone database,
 and cannot silently pick up a different zone. The ``timestamp_timezone``
 metadata is still validated on read, so the file's own claim is checked.
+
+A file is untrusted input
+-------------------------
+Arrow stores a timestamp as a signed 64-bit microsecond count, which spans far
+more instants than a Python ``datetime`` can represent, and stores a bar's
+interval as an unsigned 64-bit microsecond count, which spans roughly 584 000
+years. Neither type constrains its values to anything this module can rebuild.
+A file that was not written here — or one that was corrupted after it was — can
+therefore carry values that are perfectly legal Parquet and still have no
+``datetime`` counterpart.
+
+Two distinct guards exist because there are two distinct kinds of failure:
+
+* A **timestamp** has a fixed representable range, known ahead of time and
+  independent of every other column. It is range-checked *before*
+  reconstruction, in :func:`_timestamp_from_microseconds`, so the error names
+  the column, the row, and the offending value.
+* A bar's **interval** has no such fixed bound: whether
+  ``availability_time - interval`` is representable depends on both columns
+  together, so no per-column check can decide it. That arithmetic is allowed to
+  fail and its :class:`OverflowError` is translated at the boundary.
+
+The invariant both uphold, stated once:
+
+    No public function in this module raises :class:`OverflowError`. A stored
+    value that cannot be rebuilt is a contract violation and is reported as
+    :class:`StorageContractError`.
+
+``OverflowError`` is an :class:`ArithmeticError`, not a :class:`ValueError`, so
+it is named explicitly wherever stored values are turned back into ``datetime``
+or ``timedelta`` objects. Catching ``ValueError`` and ``TypeError`` alone does
+not cover it.
 """
 
 from __future__ import annotations
@@ -104,19 +136,39 @@ PARTIAL_SUFFIX: Final[str] = ".partial"
 
 _EPOCH: Final[datetime] = datetime(1970, 1, 1, tzinfo=UTC)
 
+_MICROSECOND: Final[timedelta] = timedelta(microseconds=1)
+
+#: Inclusive bounds, in microseconds since the epoch, of the instants a stored
+#: timestamp may denote.
+#:
+#: Derived from :class:`~datetime.datetime` itself rather than written out, so
+#: they cannot drift from the type they describe. They are a property of the
+#: Python type, not of the storage schema: no schema version depends on them,
+#: and widening them is not possible without a different in-memory
+#: representation.
+#:
+#: The range is far narrower than the ``int64`` Arrow uses to hold a
+#: microsecond count — roughly year 1 to year 9999, against a physical type
+#: that reaches some 292 000 years either side of the epoch — which is why a
+#: syntactically valid file can still hold an unrepresentable instant.
+MIN_TIMESTAMP_MICROSECONDS: Final[int] = (datetime.min.replace(tzinfo=UTC) - _EPOCH) // _MICROSECOND
+MAX_TIMESTAMP_MICROSECONDS: Final[int] = (datetime.max.replace(tzinfo=UTC) - _EPOCH) // _MICROSECOND
+
 
 class StorageError(Exception):
     """Base class for storage-layer failures."""
 
 
 class StorageContractError(StorageError):
-    """Raised when a file does not satisfy the storage contract.
+    """Raised when data does not satisfy the storage contract.
 
-    Covers a missing or unsupported schema version, absent or wrong metadata, a
-    missing or mistyped column, a null in a required column, and reading a file
-    as the wrong record type. These are contract violations with a clear cause,
-    so they are reported as such rather than surfacing as a raw Arrow or
-    Parquet error.
+    On read this covers a missing or unsupported schema version, absent or
+    wrong metadata, a missing or mistyped column, a null in a required column,
+    reading a file as the wrong record type, and a stored value that no
+    ``datetime`` or ``timedelta`` can represent. On write it covers a record
+    the storage encoding cannot hold. These are contract violations with a
+    clear cause, so they are reported as such rather than surfacing as a raw
+    Arrow, Parquet, or arithmetic error.
 
     Genuine filesystem failures — a missing file, a permission error — are not
     wrapped: they are not contract violations and their own exceptions say more.
@@ -225,6 +277,26 @@ def _validate_columns(schema: pa.Schema, expected: pa.Schema, path: Path) -> Non
             )
 
 
+def _timestamp_from_microseconds(value: int, column: str, index: int, path: Path) -> datetime:
+    """Rebuild a UTC ``datetime`` from a stored microsecond count.
+
+    The range is checked before the arithmetic rather than after it, so an
+    unrepresentable instant is reported with the column, row, and value that
+    caused it instead of as a bare "date value out of range" from deep inside
+    ``timedelta``.
+
+    Raises:
+        StorageContractError: if no ``datetime`` can represent ``value``.
+    """
+    if not MIN_TIMESTAMP_MICROSECONDS <= value <= MAX_TIMESTAMP_MICROSECONDS:
+        raise StorageContractError(
+            f"{path} row {index} column {column!r} holds {value} microseconds since the epoch, "
+            f"which is outside the representable range "
+            f"[{MIN_TIMESTAMP_MICROSECONDS}, {MAX_TIMESTAMP_MICROSECONDS}]"
+        )
+    return _EPOCH + timedelta(microseconds=value)
+
+
 def _column_values(table: pa.Table, field: pa.Field, path: Path) -> list[Any]:
     """Return one column as Python values, rejecting nulls.
 
@@ -240,7 +312,8 @@ def _column_values(table: pa.Table, field: pa.Field, path: Path) -> list[Any]:
 
     if pa.types.is_timestamp(field.type):
         return [
-            _EPOCH + timedelta(microseconds=value) for value in column.cast(pa.int64()).to_pylist()
+            _timestamp_from_microseconds(value, field.name, index, path)
+            for index, value in enumerate(column.cast(pa.int64()).to_pylist())
         ]
     return list(column.to_pylist())
 
@@ -270,11 +343,43 @@ def _reconstruct(
     for index, row in enumerate(rows):
         try:
             records.append(convert(row))
-        except (ValueError, TypeError) as error:
+        except (ValueError, TypeError, OverflowError) as error:
+            # OverflowError is an ArithmeticError, so it is named explicitly:
+            # the two-name tuple would let it through. It reaches here from
+            # arithmetic that no single column check can pre-empt — a bar's
+            # interval start is ``availability_time - interval``, and whether
+            # that is representable depends on both columns together.
             raise StorageContractError(
                 f"{path} row {index} is not a valid {label} record: {error}"
             ) from error
     return records
+
+
+def _encode_rows(
+    records: Sequence[Any],
+    encode: Any,
+    label: str,
+) -> list[Mapping[str, Any]]:
+    """Encode domain records as storage rows.
+
+    The mirror of :func:`_reconstruct`, and it exists for the same reason: the
+    public API's promise not to raise :class:`OverflowError` has to hold in both
+    directions, not only on read.
+
+    No constructible record is currently known to overflow — the domain's own
+    validation is narrower than the storage encoding — so this guard is
+    defensive. Making the guarantee depend on that coincidence would be the
+    weaker choice: it would hold only until the domain widened.
+    """
+    rows: list[Mapping[str, Any]] = []
+    for index, record in enumerate(records):
+        try:
+            rows.append(encode(record))
+        except OverflowError as error:
+            raise StorageContractError(
+                f"{label} record {index} cannot be encoded for storage: {error}"
+            ) from error
+    return rows
 
 
 # --------------------------------------------------------------------------
@@ -288,9 +393,14 @@ def write_trades(path: Path, trades: Sequence[Trade]) -> None:
     Row order is preserved exactly; no sorting is applied. Ordering is a replay
     concern with its own rules, and reordering here would hide whatever order
     the caller established.
+
+    Raises:
+        StorageContractError: if a record cannot be encoded for storage.
+        OSError: if the file cannot be written. Filesystem failures are not
+            wrapped.
     """
     _write_table_atomically(
-        _build_table([trade_to_storage_row(trade) for trade in trades], TRADE_ARROW_SCHEMA),
+        _build_table(_encode_rows(trades, trade_to_storage_row, "trade"), TRADE_ARROW_SCHEMA),
         path,
     )
 
@@ -299,7 +409,10 @@ def read_trades(path: Path) -> tuple[Trade, ...]:
     """Read trades from a Parquet file, in file order.
 
     Raises:
-        StorageContractError: if the file is not a valid trade file.
+        StorageContractError: if the file is not a valid trade file. This
+            includes a stored timestamp no ``datetime`` can represent: an
+            unreadable value is a property of the file, not a fault in this
+            process, so it is never reported as a raw ``OverflowError``.
         FileNotFoundError: if the path does not exist.
     """
     rows = _read_rows(path, TRADE_ARROW_SCHEMA)
@@ -309,7 +422,7 @@ def read_trades(path: Path) -> tuple[Trade, ...]:
 def write_quotes(path: Path, quotes: Sequence[Quote]) -> None:
     """Write quotes to ``path`` as Parquet, atomically. See :func:`write_trades`."""
     _write_table_atomically(
-        _build_table([quote_to_storage_row(quote) for quote in quotes], QUOTE_ARROW_SCHEMA),
+        _build_table(_encode_rows(quotes, quote_to_storage_row, "quote"), QUOTE_ARROW_SCHEMA),
         path,
     )
 
@@ -327,7 +440,7 @@ def write_bars(path: Path, bars: Sequence[Bar]) -> None:
     recovered on read as ``timestamp - interval``. See ADR-002.
     """
     _write_table_atomically(
-        _build_table([bar_to_storage_row(bar) for bar in bars], BAR_ARROW_SCHEMA),
+        _build_table(_encode_rows(bars, bar_to_storage_row, "bar"), BAR_ARROW_SCHEMA),
         path,
     )
 
