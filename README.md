@@ -1,9 +1,33 @@
 # Quant Research Terminal
 
-Phase 0 foundation for a local Windows desktop application supporting professional,
-reproducible quantitative research. The current build intentionally contains only the
-application shell and project structure—no market-data adapters, strategies, backtest
-engine, execution simulator, options, optimization, or AI features.
+A local Windows desktop application supporting professional, reproducible
+quantitative research on futures.
+
+The build is a **data foundation**, not a backtester. There is no backtest
+engine, replay engine, execution simulator, strategy API, options support,
+optimization, or AI feature, and none is planned before the foundation is
+correct.
+
+## What is implemented
+
+| Area | State |
+| --- | --- |
+| Immutable domain models (`Trade`, `Quote`, `Bar`, `TradeSide`) | implemented |
+| Storage contracts, fixed-point encoding, schema v2 | implemented |
+| **Parquet read/write round-trip** | implemented |
+| Import validation, normalization, ordering | implemented |
+| CSV provider | implemented |
+| Databento archived delimited export decoding | implemented |
+| ThetaData archived export decoding | **experimental, unverified** |
+
+## What is not implemented
+
+Replay, execution, strategies, portfolio, options, Monte Carlo, prop-firm
+evaluation, DuckDB, dataset partitioning or catalogue, provider registry, live
+or historical vendor APIs, credential handling, and experiment tracking.
+
+Storage writes and reads single-record-type Parquet files by path. There is no
+catalogue, no partitioning, and no performance claim.
 
 ## Requirements
 
@@ -40,7 +64,15 @@ See `PROJECT_CHARTER.md`, `docs/architecture.md`, `docs/roadmap.md`, and
 
 ## Deliberate limitations
 
-The current foundation intentionally excludes data importers, market-data vendors,
-execution simulation, strategies, options, Monte Carlo, optimization, and prop-firm
-evaluation. Those areas remain future work and are not implemented in this phase.
+- **No vendor acquisition.** Providers decode *archived* files only. Nothing
+  authenticates or opens a socket, because a live API cannot be deterministic
+  and determinism is the point.
+- **The ThetaData decoder is unverified.** It was written without inspecting a
+  real export; every vendor assumption is registered in `docs/data-import.md`
+  and none is confirmed. `provider.verification_status` reports this.
+- **Storage is a file API, not a database.** One record type per file, no
+  catalogue, no partitioning, no query layer.
+- **Reproducibility machinery does not exist yet.** There is no experiment
+  tracker, seed management, or dataset versioning beyond the storage schema
+  version.
 
