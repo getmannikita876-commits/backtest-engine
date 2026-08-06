@@ -2,7 +2,7 @@
 
 - Status: **Proposed** — the interim policy below is implemented; the contract change is not
 - Date: 2026-08-05
-- Related: `docs/data-import.md`, `docs/data-contracts.md`, ADR-002
+- Related: `docs/data-import.md`, `docs/data-contracts.md`, ADR-002, ADR-005
 
 ## Context
 
@@ -126,3 +126,17 @@ Negative:
 - Repeated trades from a defective source are imported twice, undetected.
 - The import layer's duplicate handling is now asymmetric across record types,
   which is more to explain — the asymmetry is real, but it is a cost.
+
+## Addendum (2026-08-06)
+
+The bar reasoning above — "identity is the record type plus every required
+field" — was subsequently found to be defective for bars: folding OHLCV into
+the identity made two *conflicting* records for one period look distinct, so a
+self-contradictory source passed silently. ADR-005 narrows bar identity to the
+period `(instrument_symbol, interval_start, interval)` and separates exact
+duplicates from conflicts. The statement that "two identical bars covering one
+interval are the same bar" remains true and its handling unchanged.
+
+Everything this ADR decides about **trades** stands unchanged: trades have no
+identity, are never deduplicated, and the proposed identity contract remains
+unimplemented. Quote identity also remains as described here.

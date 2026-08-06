@@ -69,12 +69,13 @@ class ValidationIssueCode(StrEnum):
     INVALID_BAR_INTERVAL = "invalid_bar_interval"
     INVALID_TRADE_SIDE = "invalid_trade_side"
     DUPLICATE_ROW = "duplicate_row"
+    CONFLICTING_BAR = "conflicting_bar"
     DESCENDING_TIMESTAMP = "descending_timestamp"
     AMBIGUOUS_TIMESTAMP_ORDER = "ambiguous_timestamp_order"
 
 
 class DuplicatePolicy(StrEnum):
-    """What to do when two records share an identity.
+    """What to do when two records are exact duplicates of one identity.
 
     Detecting a duplicate and deciding its fate are separate concerns: the
     validation stage only reports repeats, and this policy — supplied by the
@@ -83,6 +84,12 @@ class DuplicatePolicy(StrEnum):
     ``REJECT`` and ``KEEP_FIRST`` both retain the earliest occurrence; they
     differ only in intent, and are kept distinct so a caller can express
     whether keeping the first copy is a deliberate choice or a fallback.
+
+    This policy applies **only to exact duplicates** — records that agree in
+    every field. Records that share an identity but *disagree* on a value are a
+    conflict, reported as an error (``CONFLICTING_BAR``) with no surviving
+    copy; no policy value can pick a winner, because choosing one would be
+    guessing which source is authoritative. See ADR-005.
     """
 
     REJECT = "reject"

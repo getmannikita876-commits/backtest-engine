@@ -199,13 +199,15 @@ The reasoning does not carry across record types:
 
 - A **quote** is a *state observation*. Two identical top-of-book snapshots for
   one instant assert the same fact, so collapsing them loses no information.
-- A **bar** is a *summary keyed by its period*. Two identical bars covering one
-  interval are the same bar, and retaining one preserves its volume exactly.
+  A quote's identity is every required field, so a repeated quote identity is
+  always an exact duplicate.
+- A **bar** is a *summary keyed by its period*. Its identity is the period —
+  `(instrument_symbol, interval_start, interval)` — never the OHLCV values it
+  reports for that period (ADR-005). Two identical bars for one interval are
+  the same bar, and retaining one preserves its volume exactly.
 
-For these, identity is the record type plus every required field, so two
-records are duplicates only when indistinguishable in every field the domain
-models care about. `record_identity` is the single definition, used by both
-detection and policy.
+`record_identity` is the single definition of identity, used by both detection
+and policy.
 
 A discarded copy is always countable from the report: `total_rows` minus
 `accepted_rows` includes it, `warning_count` records it, and the issue message
@@ -223,6 +225,41 @@ no special handling; an unrecognised string is rejected rather than defaulted.
 | `reject` (default) | The earliest occurrence |
 | `keep_first` | The earliest occurrence |
 | `keep_last` | The latest occurrence |
+
+### Conflicting bars are rejected, not resolved (approved)
+
+Because a bar's identity is its period, two records sharing an identity are two
+*claims about one bar*. They are one of two very different things:
+
+| Case | Definition | Code | Severity | Outcome |
+| --- | --- | --- | --- | --- |
+| Exact duplicate | every value field agrees | `duplicate_row` | WARNING | one copy survives, chosen by policy |
+| Conflict | any of open, high, low, close, volume differs | `conflicting_bar` | ERROR | **no copy survives** |
+
+Before this rule, OHLCV was part of bar identity, so a conflicting revision
+looked like a distinct record and both copies were silently accepted —
+double-counting volume and leaving two bars at one timeline position whose
+order carried no meaning. The validator caught the harmless case (identical
+copies) and missed the harmful one.
+
+The `conflicting_bar` error is attributed to **every member of the conflicting
+group, including the first**, so none survives and no `DuplicatePolicy` value
+can resurrect one — `keep_last` is not a back door to prefer-later. Neither
+copy is retained because retaining either is a guess: the import layer cannot
+tell a vendor correction from a stale double-fetch, and silently preferring
+either direction would convert a visible contradiction into an invisible bias.
+The batch fails (`success=False`), the differing fields are named in the
+message, and resolution belongs to the operator, who knows the provenance.
+
+A group holding a conflict receives conflict errors only — no duplicate
+warnings, even for members that agree with each other: agreement between two
+copies is evidence of duplication, not of correctness, so identical copies do
+not outvote a revision.
+
+Only bars can conflict. A quote's identity spans every field, so a quote
+conflict is unconstructible; trades have no identity at all. See ADR-005 for
+the full decision, including the rejected alternatives (last-write-wins,
+majority vote, warning-severity conflicts).
 
 ## Deterministic event ordering (approved)
 

@@ -50,6 +50,7 @@ from quant_research_terminal.data_import.numeric_semantics import (
 )
 from quant_research_terminal.data_import.raw_record import RawRecord
 from quant_research_terminal.data_import.record_fields import (
+    INSTRUMENT_FIELD,
     INTERVAL_FIELD,
     TIMESTAMP_FIELD,
     price_fields,
@@ -154,7 +155,8 @@ _QUANTITY_ISSUE_CODES: Final[dict[NumericViolation, ValidationIssueCode]] = {
 #: A quote and a bar are different in kind. A quote is a *state observation*:
 #: two identical top-of-book snapshots for the same instant carry the same
 #: information, so collapsing them loses nothing. A bar is a *summary keyed by
-#: its period*: two identical bars for one interval are the same bar. Exact
+#: its period*: its identity is the period itself, not the values it reports
+#: for that period (see :data:`BAR_IDENTITY_FIELDS` and ADR-005). Exact
 #: duplicate removal stays enabled for both.
 #:
 #: This is an interim policy. ADR-003 proposes the trade-identity contract that
@@ -163,13 +165,51 @@ UNIDENTIFIABLE_RECORD_TYPES: Final[frozenset[ImportRecordType]] = frozenset(
     {ImportRecordType.TRADE}
 )
 
+#: The fields that *identify* a bar, as distinct from the values it carries.
+#:
+#: A bar is a summary keyed by its period: ``(instrument_symbol,
+#: interval_start, interval)``. The import record carries availability time in
+#: ``timestamp`` and ``interval_start`` is exactly ``timestamp - interval``, so
+#: with ``interval`` in the identity, ``timestamp`` determines ``interval_start``
+#: and vice versa — the tuple below defines precisely the ADR-005 identity
+#: without performing datetime arithmetic that can overflow inside a validator.
+#:
+#: OHLCV are deliberately **not** identity. Two records for the same period
+#: that disagree on a value are not two bars — they are two claims about one
+#: bar, which is a conflict, not a duplicate.
+BAR_IDENTITY_FIELDS: Final[tuple[str, ...]] = (
+    INSTRUMENT_FIELD,
+    TIMESTAMP_FIELD,
+    INTERVAL_FIELD,
+)
+
+#: The bar fields compared to separate an exact duplicate from a conflict.
+#: Derived from the required set rather than restated, so a new bar field is
+#: conflict-checked by default instead of silently ignored.
+_BAR_VALUE_FIELDS: Final[tuple[str, ...]] = tuple(
+    field for field in required_fields(ImportRecordType.BAR) if field not in BAR_IDENTITY_FIELDS
+)
+
+
+def _identity_fields(record_type: ImportRecordType) -> tuple[str, ...]:
+    """Return the fields whose values identify a record of ``record_type``."""
+    if record_type is ImportRecordType.BAR:
+        return BAR_IDENTITY_FIELDS
+    return required_fields(record_type)
+
 
 def record_identity(record: RawRecord) -> tuple[object, ...] | None:
     """Return the value identifying ``record`` for duplicate comparison.
 
-    Identity is the record type plus every required field, so two records are
-    duplicates only when they are indistinguishable in every field the domain
-    models care about.
+    Identity is type-specific:
+
+    * A **quote** is identified by every required field: two quotes are the
+      same only when indistinguishable in every field the domain models carry.
+    * A **bar** is identified by its period — instrument, availability time,
+      and interval (:data:`BAR_IDENTITY_FIELDS`) — never by its OHLCV values.
+      Two records sharing a period are two claims about one bar: identical
+      claims are a duplicate, differing claims are a conflict (ADR-005).
+    * A **trade** has no identity (:data:`UNIDENTIFIABLE_RECORD_TYPES`).
 
     This is the one authoritative definition of record identity. Duplicate
     *detection* and duplicate *policy* live in different layers, and both call
@@ -178,24 +218,55 @@ def record_identity(record: RawRecord) -> tuple[object, ...] | None:
     Returns:
         The identity tuple, or ``None`` when the record cannot participate in
         comparison. ``None`` is returned when the record type has no
-        attribute-based identity (see :data:`UNIDENTIFIABLE_RECORD_TYPES`),
-        when a required field is missing, or when a decoded value is
-        unhashable. The latter two are reported by other validators, so
-        returning ``None`` here avoids a duplicate diagnosis.
+        attribute-based identity, when a required field is missing, or when an
+        identity value is unhashable. The latter two are reported by other
+        validators, so returning ``None`` here avoids a duplicate diagnosis.
     """
     if record.record_type in UNIDENTIFIABLE_RECORD_TYPES:
         return None
 
-    expected = required_fields(record.record_type)
-    if not record.has_fields(expected):
+    if not record.has_fields(required_fields(record.record_type)):
         return None
 
-    identity = (record.record_type.value, *(record.value(field) for field in expected))
+    fields = _identity_fields(record.record_type)
+    identity = (record.record_type.value, *(record.value(field) for field in fields))
     try:
         hash(identity)
     except TypeError:
         return None
     return identity
+
+
+def _values_equal(left: object, right: object) -> bool:
+    """Return whether two field values agree, without ever raising.
+
+    Comparison against a malformed value can itself raise — ordering a
+    signalling ``NaN`` is the canonical case — and a validator must never
+    raise. A value that cannot be compared cannot be shown to agree, so it is
+    treated as differing; the malformed value is separately rejected by
+    :class:`ValueValidator`, and the disagreement makes the group a conflict
+    rather than letting the well-formed copy pass unexamined.
+    """
+    try:
+        return bool(left == right)
+    except Exception:  # noqa: BLE001 - any comparison failure means "not equal"
+        return False
+
+
+def _conflicting_fields(records: Sequence[RawRecord]) -> tuple[str, ...]:
+    """Return the bar value fields on which ``records`` do not all agree.
+
+    Every member is compared against the first, field by field, in the
+    declared field order — so the reported fields are deterministic and never
+    depend on set iteration or input permutation beyond the records' own
+    order.
+    """
+    first = records[0]
+    return tuple(
+        field
+        for field in _BAR_VALUE_FIELDS
+        if any(not _values_equal(record.value(field), first.value(field)) for record in records[1:])
+    )
 
 
 class SchemaValidator:
@@ -482,16 +553,33 @@ class ValueValidator:
 
 
 class DuplicateValidator:
-    """Detects records that repeat the identity of an earlier record.
+    """Detects records that repeat — or contradict — an earlier identity.
 
-    Identity comes from :func:`record_identity`. This validator only *reports*
-    repeats; which copy survives is decided by
-    :class:`~quant_research_terminal.data_import.contracts.DuplicatePolicy` in
-    the orchestration layer.
+    Identity comes from :func:`record_identity`. Two records sharing one
+    identity are one of two very different things (ADR-005):
+
+    * an **exact duplicate** — every field agrees. Reported per repeat as a
+      ``DUPLICATE_ROW`` warning; which copy survives is decided by
+      :class:`~quant_research_terminal.data_import.contracts.DuplicatePolicy`
+      in the orchestration layer.
+    * a **conflict** — the identity agrees but a value differs. Only bars can
+      conflict: a bar's identity is its period, while a quote's identity spans
+      every field, so a repeated quote identity is always an exact duplicate.
+      A conflict is reported as a ``CONFLICTING_BAR`` **error on every member
+      of the group, including the first**, so no copy survives. Retaining
+      either copy would silently guess which source is authoritative; the
+      validation layer has no basis for that choice, so it refuses both and
+      leaves resolution to the operator. A group holding a conflict receives
+      no duplicate warnings — its diagnosis is the conflict, and a message
+      promising that "one copy will be discarded by policy" would be false
+      there.
 
     Record types in :data:`UNIDENTIFIABLE_RECORD_TYPES` are skipped entirely.
     Without an identity, attribute equality is not evidence of duplication, and
     reporting it would invite a policy that deletes genuine records.
+
+    Issues are emitted in record order regardless of grouping, so the output
+    for a given input sequence is a pure function of that sequence.
     """
 
     @property
@@ -500,32 +588,66 @@ class DuplicateValidator:
         return "duplicate"
 
     def validate(self, records: Sequence[RawRecord]) -> tuple[ValidationIssue, ...]:
-        """Report each record whose identity already appeared earlier."""
-        issues: list[ValidationIssue] = []
-        seen: dict[tuple[object, ...], int] = {}
+        """Report duplicates and conflicts among records sharing an identity."""
+        groups: dict[tuple[object, ...], list[RawRecord]] = {}
+        for record in records:
+            identity = record_identity(record)
+            if identity is not None:
+                groups.setdefault(identity, []).append(record)
 
+        conflicts: dict[tuple[object, ...], tuple[str, ...]] = {}
+        first_index: dict[tuple[object, ...], int] = {}
+        for identity, members in groups.items():
+            first_index[identity] = members[0].source_index
+            if len(members) > 1:
+                differing = _conflicting_fields(members)
+                if differing:
+                    conflicts[identity] = differing
+
+        issues: list[ValidationIssue] = []
         for record in records:
             identity = record_identity(record)
             if identity is None:
                 continue
 
-            first_index = seen.get(identity)
-            if first_index is None:
-                seen[identity] = record.source_index
-                continue
-
-            issues.append(
-                _issue(
-                    severity=ValidationSeverity.WARNING,
-                    code=ValidationIssueCode.DUPLICATE_ROW,
-                    message=(
-                        f"identical to the record at source index {first_index}; "
-                        f"one copy will be discarded by the batch's duplicate policy"
-                    ),
-                    row_index=record.source_index,
+            conflict_fields = conflicts.get(identity)
+            if conflict_fields is not None:
+                issues.append(self._conflict_issue(record, groups[identity], conflict_fields))
+            elif record.source_index != first_index[identity]:
+                issues.append(
+                    _issue(
+                        severity=ValidationSeverity.WARNING,
+                        code=ValidationIssueCode.DUPLICATE_ROW,
+                        message=(
+                            f"identical to the record at source index "
+                            f"{first_index[identity]}; one copy will be discarded "
+                            f"by the batch's duplicate policy"
+                        ),
+                        row_index=record.source_index,
+                    )
                 )
-            )
         return tuple(issues)
+
+    @staticmethod
+    def _conflict_issue(
+        record: RawRecord, members: Sequence[RawRecord], differing: tuple[str, ...]
+    ) -> ValidationIssue:
+        others = ", ".join(
+            str(member.source_index)
+            for member in members
+            if member.source_index != record.source_index
+        )
+        return _issue(
+            severity=ValidationSeverity.ERROR,
+            code=ValidationIssueCode.CONFLICTING_BAR,
+            message=(
+                f"conflicts with the record(s) at source index(es) {others} for the "
+                f"same instrument and bar interval; differing fields: "
+                f"{', '.join(differing)}; no copy is retained"
+            ),
+            row_index=record.source_index,
+            field_name=differing[0],
+        )
 
 
 class OrderingValidator:
