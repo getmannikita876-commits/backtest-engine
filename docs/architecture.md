@@ -17,7 +17,10 @@ UI -> Application -> Data Import -> Storage -> Domain
   Where an invariant can be made structural it is: a bar's availability time is
   a derived property rather than a stored field, so a bar that would be visible
   before its interval closes cannot be constructed at all. Closed vocabularies
-  are enums (`TradeSide`), not strings.
+  are enums (`TradeSide`), not strings. The **canonical numeric envelope** lives
+  here too (`domain/numeric.py`) and is enforced on construction, so a
+  constructible domain object is a storage-encodable one. Storage and the import
+  layer both consume it; neither defines a numeric rule of its own.
 - **Storage** (`data/`) — storage contracts and Parquet persistence. Converts
   domain models into deterministic Arrow rows with explicit schema metadata and
   fixed-point decimal encoding, and reads and writes single-record-type Parquet

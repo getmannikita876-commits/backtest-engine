@@ -68,11 +68,31 @@ REQUIRED_FIELDS: Final[Mapping[ImportRecordType, tuple[str, ...]]] = MappingProx
 # Fields whose text form must decode to Decimal. Prices and sizes never pass
 # through float, because binary floating point cannot represent tick values
 # exactly and would corrupt fixed-point storage encoding downstream.
+PRICE_FIELDS: Final[Mapping[ImportRecordType, tuple[str, ...]]] = MappingProxyType(
+    {
+        ImportRecordType.TRADE: ("price",),
+        ImportRecordType.QUOTE: ("bid", "ask"),
+        ImportRecordType.BAR: ("open", "high", "low", "close"),
+    }
+)
+
+# Fields carrying a *quantity*: a count, stored as an unsigned integer.
+#
+# Ordered tuples, not sets: iteration order over a set of strings depends on
+# hash randomisation, which would make the field named in a diagnostic vary
+# between runs when more than one field is defective.
+QUANTITY_FIELDS: Final[Mapping[ImportRecordType, tuple[str, ...]]] = MappingProxyType(
+    {
+        ImportRecordType.TRADE: ("size",),
+        ImportRecordType.QUOTE: ("bid_size", "ask_size"),
+        ImportRecordType.BAR: ("volume",),
+    }
+)
+
 DECIMAL_FIELDS: Final[Mapping[ImportRecordType, frozenset[str]]] = MappingProxyType(
     {
-        ImportRecordType.TRADE: frozenset({"price", "size"}),
-        ImportRecordType.QUOTE: frozenset({"bid", "ask", "bid_size", "ask_size"}),
-        ImportRecordType.BAR: frozenset({"open", "high", "low", "close", "volume"}),
+        record_type: frozenset((*PRICE_FIELDS[record_type], *QUANTITY_FIELDS[record_type]))
+        for record_type in ImportRecordType
     }
 )
 
@@ -85,3 +105,13 @@ def required_fields(record_type: ImportRecordType) -> tuple[str, ...]:
 def decimal_fields(record_type: ImportRecordType) -> frozenset[str]:
     """Return the field names that must decode to :class:`~decimal.Decimal`."""
     return DECIMAL_FIELDS[record_type]
+
+
+def price_fields(record_type: ImportRecordType) -> tuple[str, ...]:
+    """Return the price field names, in a deterministic order."""
+    return PRICE_FIELDS[record_type]
+
+
+def quantity_fields(record_type: ImportRecordType) -> tuple[str, ...]:
+    """Return the quantity field names, in a deterministic order."""
+    return QUANTITY_FIELDS[record_type]

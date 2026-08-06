@@ -1,69 +1,83 @@
-"""Decimal value semantics shared by the data-import stages.
+"""The import layer's view of the canonical numeric envelope.
 
-This module is the authoritative definition of "a usable numeric value" for
-imported market data, and is the counterpart to
-:mod:`quant_research_terminal.data_import.time_semantics`. Validation asks
-whether a value is acceptable; normalization converts it. Both derive from the
-predicate here, so the two stages can never disagree about what a price is.
+The envelope itself — what counts as a representable price or quantity — is
+defined once in :mod:`quant_research_terminal.domain.numeric`. This module
+holds no rules of its own; it re-exports the parts the import stages need, so
+those stages have one place to import from and no opportunity to restate a
+rule.
 
-Floats are rejected outright. Binary floating point cannot represent decimal
-tick values exactly, so admitting a float would silently corrupt the exact
-fixed-point encoding the storage contract depends on. A caller holding a float
-must decide how to convert it and record that decision, rather than have this
-package guess.
+Translating a violation into this layer's issue-code vocabulary belongs to
+:mod:`~quant_research_terminal.data_import.validation`, which owns those codes.
+Keeping that mapping out of here leaves this module a leaf that depends on
+nothing above the domain.
+
+Keeping the rules in the domain is what upholds the property the import layer
+exists to serve: a record that passes validation constructs as a domain object,
+and that object's numeric fields encode exactly into the storage schema.
 """
 
 from __future__ import annotations
 
 from decimal import Decimal
 
+from quant_research_terminal.domain.numeric import (
+    NumericEnvelopeError,
+    NumericViolation,
+    as_envelope_decimal,
+    check_price,
+    check_quantity,
+    validate_price,
+    validate_quantity,
+    violation_message,
+)
+
+__all__ = [
+    "NumericEnvelopeError",
+    "NumericViolation",
+    "check_price",
+    "check_quantity",
+    "is_decimal_like",
+    "is_non_finite_decimal",
+    "to_decimal",
+    "validate_price",
+    "validate_quantity",
+    "violation_message",
+]
+
 
 def is_non_finite_decimal(value: object) -> bool:
-    """Return whether ``value`` is a :class:`Decimal` that is not a finite number.
+    """Return whether ``value`` is a :class:`Decimal` that is not finite.
 
-    Covers ``NaN``, ``sNaN``, ``Infinity``, and ``-Infinity``. The check uses
+    Covers ``NaN``, ``sNaN``, ``Infinity``, and ``-Infinity``. Uses
     :meth:`Decimal.is_finite`, which inspects the value rather than comparing
-    it: ordering comparisons against ``NaN`` are false and comparisons against
-    ``sNaN`` raise, so any guard built on comparison is defeated by exactly the
-    values this predicate exists to catch.
+    it: ordering comparisons against ``NaN`` are false and against ``sNaN``
+    raise, so any guard built on comparison is defeated by exactly the values
+    this predicate exists to catch.
     """
     return isinstance(value, Decimal) and not value.is_finite()
 
 
 def is_decimal_like(value: object) -> bool:
-    """Return whether ``value`` can become a finite :class:`Decimal` without loss.
+    """Return whether ``value`` is a finite :class:`Decimal` or :class:`int`.
 
-    Finite :class:`Decimal` and :class:`int` values qualify. ``bool`` does not:
-    it is an ``int`` subclass, but a boolean is never a price, size, or volume,
-    and accepting it would let ``True`` silently import as the quantity ``1``.
-    ``float`` does not qualify, for the reason given in the module docstring.
-
-    Non-finite decimals do not qualify either. Admitting them would make every
-    downstream ordering check — positivity, bid-versus-ask, the OHLC range —
-    vacuously true or raise, so the value has to be excluded here rather than
-    relied upon to fail a later comparison.
+    A shape check only — it says nothing about positivity, magnitude, or scale.
+    Use :func:`check_price` or :func:`check_quantity` for the full envelope.
     """
-    if isinstance(value, bool):
-        return False
-    if isinstance(value, Decimal):
-        return value.is_finite()
-    return isinstance(value, int)
+    number = as_envelope_decimal(value)
+    return number is not None and number.is_finite()
 
 
 def to_decimal(value: object) -> Decimal:
     """Convert an accepted numeric value to a finite :class:`Decimal`.
 
     Raises:
-        ValueError: if ``value`` is not accepted by :func:`is_decimal_like`,
-            including when it is a non-finite decimal. Callers are expected to
-            have validated first; reaching this error means a validation stage
-            was skipped, so it fails loudly rather than propagating a value no
-            comparison can order.
+        ValueError: if the value is not a finite ``Decimal`` or ``int``.
+            Callers are expected to have validated first; reaching this error
+            means a validation stage was skipped.
     """
-    if isinstance(value, Decimal):
-        if not value.is_finite():
-            raise ValueError("value must be a finite Decimal")
-        return value
-    if is_decimal_like(value) and isinstance(value, int):
-        return Decimal(value)
-    raise ValueError("value must be a Decimal")
+    number = as_envelope_decimal(value)
+    if number is None:
+        raise ValueError("value must be a Decimal")
+    if not number.is_finite():
+        raise ValueError("value must be a finite Decimal")
+    return number

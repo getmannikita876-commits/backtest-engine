@@ -219,7 +219,7 @@ def test_boolean_quote_size_is_rejected() -> None:
     assert _codes(issues) == ["negative_value"]
 
 
-@pytest.mark.parametrize("size", [Decimal("1"), Decimal("0.5"), 7])
+@pytest.mark.parametrize("size", [Decimal("1"), Decimal("100"), 7])
 def test_valid_quote_sizes_are_accepted(size: object) -> None:
     record = _record(ImportRecordType.QUOTE, _quote_row(bid_size=size, ask_size=size))
 
@@ -247,20 +247,28 @@ def test_zero_quote_size_is_rejected_end_to_end_without_raising() -> None:
 
 
 def test_zero_volume_bar_is_rejected() -> None:
-    # Decision: Bar.volume is PositiveDecimal in the approved domain contract,
-    # so an empty period is represented by the absence of a bar.
+    # Volume is a quantity in the canonical envelope, so an empty period is
+    # represented by the absence of a bar. It reports a quantity code; it
+    # previously reported non_decimal_price, which misdescribed a count.
     record = _record(ImportRecordType.BAR, _bar_row(volume=Decimal("0")))
 
     issues = ValueValidator().validate([record])
 
-    assert _codes(issues) == ["non_decimal_price"]
+    assert _codes(issues) == ["negative_value"]
     assert "positive" in issues[0].message
 
 
 def test_smallest_positive_volume_is_accepted() -> None:
-    record = _record(ImportRecordType.BAR, _bar_row(volume=Decimal("0.000001")))
+    # Quantities are counts, so the smallest is one, not one storage tick.
+    record = _record(ImportRecordType.BAR, _bar_row(volume=Decimal("1")))
 
     assert ValueValidator().validate([record]) == ()
+
+
+def test_fractional_volume_is_rejected() -> None:
+    record = _record(ImportRecordType.BAR, _bar_row(volume=Decimal("0.5")))
+
+    assert _codes(ValueValidator().validate([record])) == ["non_integer_quantity"]
 
 
 def test_volume_of_one_is_accepted() -> None:
@@ -272,7 +280,7 @@ def test_volume_of_one_is_accepted() -> None:
 def test_negative_volume_is_rejected() -> None:
     record = _record(ImportRecordType.BAR, _bar_row(volume=Decimal("-1")))
 
-    assert _codes(ValueValidator().validate([record])) == ["non_decimal_price"]
+    assert _codes(ValueValidator().validate([record])) == ["negative_value"]
 
 
 def test_zero_volume_bar_is_rejected_end_to_end() -> None:

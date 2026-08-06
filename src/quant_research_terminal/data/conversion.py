@@ -1,15 +1,13 @@
 from __future__ import annotations
 
-import decimal
 from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 from typing import TypedDict
 
 import pyarrow as pa  # type: ignore[import-untyped]
 
 from quant_research_terminal.data.contracts import (
-    MAX_FIXED_POINT_VALUE,
     PRICE_ENCODING,
     PRICE_PRECISION,
     PRICE_QUANTUM,
@@ -20,6 +18,14 @@ from quant_research_terminal.data.contracts import (
     UINT64_MAX,
 )
 from quant_research_terminal.domain.models import Bar, Quote, Trade, parse_trade_side
+from quant_research_terminal.domain.numeric import (
+    MAX_PRICE_FIXED_POINT,
+    MAX_QUANTITY_INTEGER,
+    fixed_point_to_price,
+    price_to_fixed_point,
+    validate_price,
+    validate_quantity,
+)
 
 
 class TradeStorageRow(TypedDict):
@@ -91,61 +97,48 @@ def _validate_storage_timestamp(value: object, field_name: str) -> datetime:
 
 
 def _decimal_to_fixed_point(value: Decimal, field_name: str) -> int:
-    if value.is_nan() or value.is_infinite():
-        raise ValueError(f"{field_name} must be a finite decimal value")
-    if value < 0:
-        raise ValueError(f"{field_name} must be non-negative")
-    with decimal.localcontext() as ctx:
-        ctx.traps[decimal.Inexact] = True
-        ctx.traps[decimal.Rounded] = True
-        try:
-            quantized = value.quantize(PRICE_QUANTUM, context=ctx)
-        except (InvalidOperation, decimal.Inexact, decimal.Rounded) as exc:
-            raise ValueError(
-                f"{field_name} must have at most {PRICE_SCALE} fractional digits"
-            ) from exc
-    if quantized != value:
-        raise ValueError(f"{field_name} must quantize exactly to a fixed scale")
-    integer_value = int(quantized.scaleb(PRICE_SCALE))
-    if integer_value > MAX_FIXED_POINT_VALUE:
-        raise OverflowError(
-            f"{field_name} exceeds fixed-point precision of {PRICE_PRECISION} digits"
-        )
-    return integer_value
+    """Encode a price as its fixed-point integer.
+
+    Enforces the canonical envelope defensively rather than defining a second
+    one. A value reaching here should already have satisfied
+    :func:`~quant_research_terminal.domain.numeric.check_price` at construction,
+    so a violation means a layer was bypassed. The value is scaled, never
+    rounded — the envelope has already established the scaling discards nothing.
+
+    Raises:
+        NumericEnvelopeError: naming the specific violation. Magnitude and
+            precision are distinguished, so an out-of-range value is no longer
+            reported as having too many decimal places.
+    """
+    return price_to_fixed_point(validate_price(value, field_name))
 
 
 def _decimal_to_unsigned_int(value: Decimal, field_name: str) -> int:
-    if value.is_nan() or value.is_infinite():
-        raise ValueError(f"{field_name} must be a finite decimal value")
-    if value < 0:
-        raise ValueError(f"{field_name} must be non-negative")
-    with decimal.localcontext() as ctx:
-        ctx.traps[decimal.Inexact] = True
-        ctx.traps[decimal.Rounded] = True
-        try:
-            integer_value = int(value.to_integral_value(context=ctx))
-        except (InvalidOperation, decimal.Inexact, decimal.Rounded) as exc:
-            raise ValueError(f"{field_name} must be a whole number") from exc
-    if Decimal(integer_value) != value:
-        raise ValueError(f"{field_name} must be a whole number")
-    if integer_value > UINT64_MAX:
-        raise OverflowError(f"{field_name} exceeds unsigned 64-bit integer storage")
-    return integer_value
+    """Encode a quantity as its unsigned integer.
+
+    Enforces the canonical envelope defensively; see
+    :func:`_decimal_to_fixed_point`.
+    """
+    return int(validate_quantity(value, field_name).to_integral_value())
 
 
 def _fixed_point_to_decimal(value: object, field_name: str) -> Decimal:
-    if not isinstance(value, int):
+    if not isinstance(value, int) or isinstance(value, bool):
         raise TypeError(f"{field_name} must be stored as an int")
     if value < 0:
         raise ValueError(f"{field_name} must be non-negative")
-    return Decimal(value).scaleb(-PRICE_SCALE).quantize(PRICE_QUANTUM)
+    if value > MAX_PRICE_FIXED_POINT:
+        raise ValueError(f"{field_name} exceeds the representable price range")
+    return fixed_point_to_price(value).quantize(PRICE_QUANTUM)
 
 
 def _unsigned_int_to_decimal(value: object, field_name: str) -> Decimal:
-    if not isinstance(value, int):
+    if not isinstance(value, int) or isinstance(value, bool):
         raise TypeError(f"{field_name} must be stored as an int")
     if value < 0:
         raise ValueError(f"{field_name} must be non-negative")
+    if value > MAX_QUANTITY_INTEGER:
+        raise ValueError(f"{field_name} exceeds unsigned 64-bit integer storage")
     return Decimal(value)
 
 

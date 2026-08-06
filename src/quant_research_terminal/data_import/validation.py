@@ -42,15 +42,18 @@ from quant_research_terminal.data_import.contracts import (
     ValidationSeverity,
 )
 from quant_research_terminal.data_import.numeric_semantics import (
-    is_decimal_like,
-    is_non_finite_decimal,
+    NumericViolation,
+    check_price,
+    check_quantity,
     to_decimal,
+    violation_message,
 )
 from quant_research_terminal.data_import.raw_record import RawRecord
 from quant_research_terminal.data_import.record_fields import (
     INTERVAL_FIELD,
     TIMESTAMP_FIELD,
-    decimal_fields,
+    price_fields,
+    quantity_fields,
     required_fields,
 )
 from quant_research_terminal.data_import.time_semantics import (
@@ -72,11 +75,6 @@ _TIMESTAMP_CODES: Final[dict[TimestampStatus, ValidationIssueCode]] = {
     TimestampStatus.NAIVE: ValidationIssueCode.NAIVE_DATETIME,
     TimestampStatus.NON_UTC: ValidationIssueCode.NON_UTC_TIMESTAMP,
 }
-
-_OHLC_FIELDS: Final[tuple[str, ...]] = ("open", "high", "low", "close", "volume")
-
-#: Quote size fields, validated by the same rule as every other quantity.
-_QUOTE_SIZE_FIELDS: Final[tuple[str, ...]] = ("bid_size", "ask_size")
 
 
 @runtime_checkable
@@ -112,6 +110,36 @@ def _issue(
         field_name=field_name,
         message=message,
     )
+
+
+#: Issue code reported for each envelope violation of a **price** field.
+#:
+#: ``NOT_A_NUMBER`` and ``NOT_POSITIVE`` keep the long-standing
+#: ``non_decimal_price`` code so existing diagnostics stay stable; the
+#: conditions the envelope newly distinguishes get their own codes.
+_PRICE_ISSUE_CODES: Final[dict[NumericViolation, ValidationIssueCode]] = {
+    NumericViolation.NOT_A_NUMBER: ValidationIssueCode.NON_DECIMAL_PRICE,
+    NumericViolation.NOT_POSITIVE: ValidationIssueCode.NON_DECIMAL_PRICE,
+    NumericViolation.NON_FINITE: ValidationIssueCode.NON_FINITE_VALUE,
+    NumericViolation.MAGNITUDE_TOO_LARGE: ValidationIssueCode.MAGNITUDE_EXCEEDED,
+    NumericViolation.TOO_MANY_FRACTIONAL_DIGITS: ValidationIssueCode.PRECISION_EXCEEDED,
+    NumericViolation.NOT_WHOLE: ValidationIssueCode.NON_INTEGER_QUANTITY,
+}
+
+#: Issue code reported for each envelope violation of a **quantity** field.
+#:
+#: Quantities keep ``negative_value`` for the not-a-number and not-positive
+#: cases, matching the code this layer has always reported for sizes. Bar
+#: volume is a quantity and now reports these codes too; it previously
+#: reported ``non_decimal_price``, which misdescribed a count as a price.
+_QUANTITY_ISSUE_CODES: Final[dict[NumericViolation, ValidationIssueCode]] = {
+    NumericViolation.NOT_A_NUMBER: ValidationIssueCode.NEGATIVE_VALUE,
+    NumericViolation.NOT_POSITIVE: ValidationIssueCode.NEGATIVE_VALUE,
+    NumericViolation.NON_FINITE: ValidationIssueCode.NON_FINITE_VALUE,
+    NumericViolation.MAGNITUDE_TOO_LARGE: ValidationIssueCode.MAGNITUDE_EXCEEDED,
+    NumericViolation.TOO_MANY_FRACTIONAL_DIGITS: ValidationIssueCode.PRECISION_EXCEEDED,
+    NumericViolation.NOT_WHOLE: ValidationIssueCode.NON_INTEGER_QUANTITY,
+}
 
 
 #: Record types whose identity cannot be established from their attributes.
@@ -298,41 +326,48 @@ class ValueValidator:
                 issues.append(issue)
         return tuple(issues)
 
-    @staticmethod
-    def _numeric_fields(record_type: ImportRecordType) -> tuple[str, ...]:
-        """Return the record type's numeric fields in a deterministic order.
+    def _envelope_issue(self, record: RawRecord) -> ValidationIssue | None:
+        """Report the first numeric field that falls outside the envelope.
 
-        Derived from the ordered required-field tuple rather than iterated over
-        the decimal-field set: set iteration order depends on string hashing,
-        which would make the *reported* field vary between runs when more than
-        one field is defective.
+        Delegates every rule to the canonical envelope in
+        :mod:`quant_research_terminal.domain.numeric` and only translates the
+        answer into this layer's issue codes. Because the domain models enforce
+        the same envelope, a record that passes here constructs successfully
+        and encodes exactly into storage.
+
+        Prices are checked before quantities, and each group in its declared
+        field order, so the field named in a diagnostic is stable rather than
+        dependent on set iteration order.
         """
-        numeric = decimal_fields(record_type)
-        return tuple(field for field in required_fields(record_type) if field in numeric)
+        record_type = record.record_type
 
-    def _non_finite_issue(self, record: RawRecord) -> ValidationIssue | None:
-        """Report the first non-finite numeric value in the record.
-
-        Checked before any other numeric rule. Every later check is an ordering
-        comparison, and ``NaN`` makes those false while ``sNaN`` makes them
-        raise, so a non-finite value reaching them would slip through
-        undetected or abort the run.
-        """
-        for field_name in self._numeric_fields(record.record_type):
-            if is_non_finite_decimal(record.value(field_name)):
+        for field_name in price_fields(record_type):
+            price_violation = check_price(record.value(field_name))
+            if price_violation is not None:
                 return _issue(
                     severity=ValidationSeverity.ERROR,
-                    code=ValidationIssueCode.NON_FINITE_VALUE,
-                    message=f"{field_name} must be a finite number",
+                    code=_PRICE_ISSUE_CODES[price_violation],
+                    message=violation_message(price_violation, field_name),
+                    row_index=record.source_index,
+                    field_name=field_name,
+                )
+
+        for field_name in quantity_fields(record_type):
+            quantity_violation = check_quantity(record.value(field_name))
+            if quantity_violation is not None:
+                return _issue(
+                    severity=ValidationSeverity.ERROR,
+                    code=_QUANTITY_ISSUE_CODES[quantity_violation],
+                    message=violation_message(quantity_violation, field_name),
                     row_index=record.source_index,
                     field_name=field_name,
                 )
         return None
 
     def _record_issue(self, record: RawRecord) -> ValidationIssue | None:
-        non_finite = self._non_finite_issue(record)
-        if non_finite is not None:
-            return non_finite
+        envelope = self._envelope_issue(record)
+        if envelope is not None:
+            return envelope
 
         if record.record_type is ImportRecordType.TRADE:
             return self._trade_issue(record)
@@ -341,18 +376,6 @@ class ValueValidator:
         return self._bar_issue(record)
 
     def _trade_issue(self, record: RawRecord) -> ValidationIssue | None:
-        price = record.value("price")
-        if not is_decimal_like(price):
-            return self._value_issue(record, "price must be a Decimal", "price")
-        if to_decimal(price) <= 0:
-            return self._value_issue(record, "price must be positive", "price")
-
-        size = record.value("size")
-        if not is_decimal_like(size):
-            return self._size_issue(record, "size must be a Decimal", "size")
-        if to_decimal(size) <= 0:
-            return self._size_issue(record, "size must be positive", "size")
-
         try:
             parse_trade_side(record.value("side"))
         except ValueError as exc:
@@ -368,15 +391,8 @@ class ValueValidator:
         return None
 
     def _quote_issue(self, record: RawRecord) -> ValidationIssue | None:
-        bid = record.value("bid")
-        ask = record.value("ask")
-        if not is_decimal_like(bid) or not is_decimal_like(ask):
-            return self._value_issue(record, "bid/ask must be Decimal values", "bid")
-
-        bid_value = to_decimal(bid)
-        ask_value = to_decimal(ask)
-        if bid_value <= 0 or ask_value <= 0:
-            return self._value_issue(record, "bid/ask must be positive", "bid")
+        bid_value = to_decimal(record.value("bid"))
+        ask_value = to_decimal(record.value("ask"))
         if bid_value > ask_value:
             return _issue(
                 severity=ValidationSeverity.ERROR,
@@ -385,13 +401,6 @@ class ValueValidator:
                 row_index=record.source_index,
                 field_name="bid",
             )
-
-        for field_name in _QUOTE_SIZE_FIELDS:
-            size = record.value(field_name)
-            if not is_decimal_like(size):
-                return self._size_issue(record, f"{field_name} must be a Decimal", field_name)
-            if to_decimal(size) <= 0:
-                return self._size_issue(record, f"{field_name} must be positive", field_name)
         return None
 
     def _bar_issue(self, record: RawRecord) -> ValidationIssue | None:
@@ -407,15 +416,9 @@ class ValueValidator:
         if range_issue is not None:
             return range_issue
 
-        raw_values = [record.value(field) for field in _OHLC_FIELDS]
-        if not all(is_decimal_like(value) for value in raw_values):
-            return self._value_issue(record, "bar fields must be Decimal values", "open")
-
-        values = [to_decimal(value) for value in raw_values]
-        if any(value <= 0 for value in values):
-            return self._value_issue(record, "bar values must be positive", "open")
-
-        open_value, high, low, close, _volume = values
+        open_value, high, low, close = (
+            to_decimal(record.value(field)) for field in ("open", "high", "low", "close")
+        )
         if self._ohlc_inconsistent(open_value=open_value, high=high, low=low, close=close):
             return _issue(
                 severity=ValidationSeverity.ERROR,
@@ -431,16 +434,6 @@ class ValueValidator:
         *, open_value: Decimal, high: Decimal, low: Decimal, close: Decimal
     ) -> bool:
         return high < low or open_value < low or open_value > high or close < low or close > high
-
-    @staticmethod
-    def _value_issue(record: RawRecord, message: str, field_name: str) -> ValidationIssue:
-        return _issue(
-            severity=ValidationSeverity.ERROR,
-            code=ValidationIssueCode.NON_DECIMAL_PRICE,
-            message=message,
-            row_index=record.source_index,
-            field_name=field_name,
-        )
 
     @staticmethod
     def _interval_range_issue(record: RawRecord, interval: timedelta) -> ValidationIssue | None:
@@ -485,16 +478,6 @@ class ValueValidator:
             message=message,
             row_index=record.source_index,
             field_name=INTERVAL_FIELD,
-        )
-
-    @staticmethod
-    def _size_issue(record: RawRecord, message: str, field_name: str) -> ValidationIssue:
-        return _issue(
-            severity=ValidationSeverity.ERROR,
-            code=ValidationIssueCode.NEGATIVE_VALUE,
-            message=message,
-            row_index=record.source_index,
-            field_name=field_name,
         )
 
 

@@ -125,9 +125,30 @@ is a domain-layer decision rather than an import-layer one. If empty periods
 must become representable, revisit `Bar.volume` in the domain package first; the
 import rule follows from it.
 
-Values are exact: finite `Decimal` and `int` are accepted, `bool` and `float`
-are not. Binary floating point cannot represent decimal tick values exactly, so
-admitting a float would corrupt the fixed-point storage encoding downstream.
+Values are judged against the **canonical numeric envelope** defined in
+`quant_research_terminal.domain.numeric` and documented in
+`docs/data-contracts.md`. The import layer restates no rule of its own; it asks
+the domain and translates the answer into an issue code. A record that passes
+validation therefore constructs as a domain object, and that object's numeric
+fields encode exactly into storage schema v2.
+
+| Violation | Price field | Quantity field |
+| --- | --- | --- |
+| Not a `Decimal`/`int` (float, bool) | `non_decimal_price` | `negative_value` |
+| Zero or negative | `non_decimal_price` | `negative_value` |
+| NaN, sNaN, ±Infinity | `non_finite_value` | `non_finite_value` |
+| Beyond the representable magnitude | `magnitude_exceeded` | `magnitude_exceeded` |
+| Requires removing a non-zero digit past 6 decimal places | `precision_exceeded` | `precision_exceeded` |
+| Not a whole number | — | `non_integer_quantity` |
+
+Bar `volume` is a **quantity**, so it reports quantity codes. It previously
+reported `non_decimal_price`, which misdescribed a count as a price.
+
+Fields are examined in a declared order — prices first, then quantities, each in
+its own declared order — so the field named in a diagnostic does not vary
+between runs. Envelope checks run before the relational rules (bid versus ask,
+the OHLC range), because those are ordering comparisons and comparisons against
+`NaN` are false while comparisons against `sNaN` raise.
 
 ### Non-finite values are rejected first
 
