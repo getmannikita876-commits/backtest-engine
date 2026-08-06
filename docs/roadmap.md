@@ -199,6 +199,43 @@ availability time, row order, and repeated identical trades remaining repeated.
 Not implemented: DuckDB, dataset catalogue, partitioning, caching, query layer,
 performance work.
 
+## Phase 1.7B — Numeric domain envelope (in progress)
+
+Unifies the numeric contract. Recovers work that a previous session reported as
+complete but which never reached Git — the repository was the authority, and the
+envelope was rebuilt from it.
+
+One envelope, defined in `domain/numeric.py`, consumed by domain models, import
+validation, and storage conversion. See ADR-004 (**Accepted**).
+
+- **Invariant established:** every constructible domain object is
+  storage-encodable — its numeric fields encode exactly into schema v2 with no
+  rounding, truncation, overflow, or float coercion.
+- **Six mismatches closed**, where the domain accepted a value storage rejected:
+  magnitude overflow, sub-tick precision, fixed-point overflow, trailing zeros,
+  fractional quantities, and uint64 overflow.
+- **Fixed a defect the audit did not find:** the precision rule trapped
+  `Rounded`, which fires on trailing zeros carrying no information, so *every
+  Databento-decoded price was unstorable*. The rule now traps `Inexact`.
+- Separate price and quantity envelopes: maximum exact fractional precision for
+  prices is 6 decimal places (trailing zeros beyond that accepted, a non-zero
+  digit rejected); quantities are whole counts.
+- Magnitude is checked before precision, so an enormous value is no longer
+  reported as having too many decimal places.
+- Constants moved from `data/contracts.py` down to the domain, which may not
+  import storage; `data/contracts.py` re-exports them. A test asserts no module
+  redefines them.
+- **No schema bump.** The serialized representation is unchanged; version-2
+  files remain valid. Recorded as a clarification of version 2.
+
+Compatibility: the domain is stricter, so fractional quantities and sub-tick
+prices now fail at construction rather than at save time. Bar volume reports
+quantity issue codes rather than `non_decimal_price`. Storage raises
+`NumericEnvelopeError` rather than a `ValueError`/`OverflowError` pair.
+
+Still open: signed values (PnL, deltas) have no envelope; fractional quantities
+would need a schema change.
+
 ## Later phases (gated)
 
 Deterministic replay, strategy APIs, execution simulation, experiments, and

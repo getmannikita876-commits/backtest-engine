@@ -2,7 +2,11 @@ from __future__ import annotations
 
 from pydantic import Field, field_validator
 
-from quant_research_terminal.domain.common import PositiveDecimal, _UtcTimestampModel
+from quant_research_terminal.domain.common import (
+    PriceDecimal,
+    QuantityDecimal,
+    _UtcTimestampModel,
+)
 from quant_research_terminal.domain.trade_side import TradeSide, parse_trade_side
 
 
@@ -16,8 +20,8 @@ class Trade(_UtcTimestampModel):
     """
 
     instrument_symbol: str = Field(min_length=1)
-    price: PositiveDecimal
-    size: PositiveDecimal
+    price: PriceDecimal
+    size: QuantityDecimal
     side: TradeSide
 
     @field_validator("side", mode="before")
