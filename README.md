@@ -16,6 +16,7 @@ correct.
 | Storage contracts, fixed-point encoding, schema v2 | implemented |
 | **Parquet read/write round-trip** | implemented |
 | Import validation, normalization, ordering | implemented |
+| End-to-end import use case (provider → validated Parquet, verified by read-back) | implemented |
 | CSV provider | implemented |
 | Databento archived delimited export decoding | implemented |
 | ThetaData archived export decoding | **experimental, unverified** |

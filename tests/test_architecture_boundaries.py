@@ -29,6 +29,12 @@ DOMAIN = f"{ROOT_MODULE}.domain"
 UI = f"{ROOT_MODULE}.ui"
 DATA_IMPORT = f"{ROOT_MODULE}.data_import"
 PROVIDERS = f"{DATA_IMPORT}.providers"
+APPLICATION = f"{ROOT_MODULE}.application"
+
+#: The one vendor-neutral module inside the providers package. The application
+#: layer may import the provider *interface* from it; every other module under
+#: ``providers`` is a concrete implementation the application must never touch.
+PROVIDER_INTERFACE = f"{PROVIDERS}.provider"
 
 
 def _module_name(path: Path) -> str:
@@ -149,3 +155,47 @@ def test_semantics_modules_depend_on_nothing_in_the_import_layer() -> None:
         _, imported = _modules_under(f"{DATA_IMPORT}.{module}")[0]
         internal = {name for name in imported if name.startswith(f"{DATA_IMPORT}.")}
         assert internal == set()
+
+
+# --------------------------------------------------------------------------
+# Application layer (Phase 1.9, ADR-007)
+#
+# Application orchestrates downward — data_import, storage, domain — and is
+# depended on only from above (UI, later). Nothing below it may know it
+# exists, and it may not reach into vendor code or the UI.
+# --------------------------------------------------------------------------
+
+
+def test_the_application_package_is_actually_being_scanned() -> None:
+    assert len(_modules_under(APPLICATION)) >= 3
+
+
+def test_application_does_not_import_ui() -> None:
+    assert _violations(source_prefix=APPLICATION, forbidden_prefix=UI) == []
+
+
+def test_domain_does_not_import_application() -> None:
+    assert _violations(source_prefix=DOMAIN, forbidden_prefix=APPLICATION) == []
+
+
+def test_storage_does_not_import_application() -> None:
+    assert _violations(source_prefix=STORAGE, forbidden_prefix=APPLICATION) == []
+
+
+def test_data_import_does_not_import_application() -> None:
+    # Covers the providers subpackage too: nothing below the application
+    # layer may depend on it, or the dependency direction inverts.
+    assert _violations(source_prefix=DATA_IMPORT, forbidden_prefix=APPLICATION) == []
+
+
+def test_application_does_not_import_provider_implementations() -> None:
+    # The application accepts any MarketDataProvider through the interface
+    # module and must never bind to a vendor. Everything under ``providers``
+    # except the interface module itself is a concrete implementation.
+    violations = [
+        violation
+        for violation in _violations(source_prefix=APPLICATION, forbidden_prefix=PROVIDERS)
+        if not violation.endswith(f"imports {PROVIDER_INTERFACE}")
+        and f"imports {PROVIDER_INTERFACE}." not in violation
+    ]
+    assert violations == []

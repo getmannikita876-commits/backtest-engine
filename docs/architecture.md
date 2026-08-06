@@ -30,8 +30,18 @@ UI -> Application -> Data Import -> Storage -> Domain
   `docs/data-contracts.md`.
 - **Data Import** (`data_import/`) — providers, validation, normalization, and
   the orchestration that sequences them. See `docs/data-import.md`.
+- **Application** (`application/`) — use cases that orchestrate the layers
+  below; owns no business rules (ADR-007). The first and currently only use
+  case is `ImportDatasetUseCase`: provider → validation → normalization →
+  deterministic ordering → Parquet write → read-back → structural
+  verification, published atomically only when fully verified. It accepts any
+  `MarketDataProvider` through the existing interface, never imports a
+  concrete vendor module, and calls the concrete storage functions directly —
+  a storage port is deliberately deferred until a second backend exists. Its
+  boundary surface is declared in `application/ports.py`.
 - **UI** (`ui/`) — displays data and starts operations; contains no business
-  logic and does not reach into the import or storage layers.
+  logic and does not reach into the import or storage layers. It will call
+  the application layer; it does not yet.
 
 `tests/test_architecture_boundaries.py` enforces these edges by parsing the
 import graph, so a forbidden dependency fails CI rather than eroding quietly.
