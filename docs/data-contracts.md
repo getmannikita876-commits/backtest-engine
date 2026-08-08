@@ -125,6 +125,37 @@ The storage package exposes an explicit schema contract:
 | 1 | Initial trade, quote, and bar contracts |
 | 2 | Bars gained `interval_microseconds`; the trade `side` column was constrained to the `TradeSide` vocabulary |
 
+**Version 2 note (ADR-009), no bump: canonical futures identity is _not_
+persisted.** Phase 2.0 introduced `FuturesContractId` in the domain — a venue,
+a product root, a delivery month, and a full four-digit year, canonically
+`CME:ES:M2026`. **Storage does not carry it.** All three schemas store a single
+`instrument_symbol` column of type `utf8`, and that column cannot represent
+canonical identity:
+
+| Canonical component | Recoverable from a schema-v2 file? |
+| --- | --- |
+| Venue | **No** — no column and no metadata field records it |
+| Product root | Only by guessing a vendor's symbol syntax |
+| Delivery month | Only by guessing a vendor's symbol syntax |
+| Full contract year | **No** — `"ESM6"` carries one digit and no decade |
+
+The repository's own fixture is the concrete example: `"ESM6"` with rows dated
+March 2024 is consistent with a June 2026 listing *and* with a re-used symbol
+from June 2016. Nothing in the file decides between them.
+
+An automatic upgrade would therefore have to invent a venue and guess a decade,
+silently giving a file written yesterday a different meaning today — which the
+backward-compatibility policy forbids outright. So `SCHEMA_VERSION` remains 2,
+every column name, type, and metadata semantic is unchanged, and every existing
+version-2 file remains valid and means exactly what it did before.
+
+Full persistence of canonical identity requires a **schema v3** storing the
+components as separate columns (or a canonical string plus a venue), together
+with a migration that requires the operator to *declare* the venue and contract
+year per dataset rather than inferring either. That is a future decision with
+its own migration plan. Until then, the legacy `instrument_symbol` string is a
+**vendor alias**, not canonical identity, and must not be read as one.
+
 **Version 2 clarification (ADR-004), no bump.** The canonical numeric envelope
 narrows what the *domain* accepts; it does not change what storage writes or how
 a written file is read. Column names, types, fixed-point encoding, and metadata

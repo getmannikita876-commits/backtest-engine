@@ -307,6 +307,56 @@ ADR-007 (**Accepted**).
   into domain objects or Parquet (recorded for Phases 2.0/2.3); no dataset
   catalog, no manifest, no rollover, no replay, no UI integration yet.
 
+## Phase 2.0 — Futures instrument and contract identity (in progress)
+
+Replaces the bare `instrument_symbol` string as the platform's notion of *which
+futures contract this is*. See ADR-009 (**Accepted for the domain model;
+persistence deliberately deferred**).
+
+- **`FuturesContractId`** = `FuturesProduct` (a `Venue` plus a product root)
+  plus a `ContractMonth` plus a **full four-digit year**. Canonical form
+  `CME:ES:M2026`. Immutable, hashable, strictly validated, `@final`.
+- **A product is not executable.** `ES` is a `FuturesProduct`; only a
+  `FuturesContractId` passes `require_listed_contract`, the guard future
+  execution code calls. A continuous series must be its own type and fails that
+  guard without the guard knowing it exists.
+- **`ESM6` never means 2026 by inference.** The one expansion function requires
+  an explicit decade and has no default, so no code path can depend on the
+  current date. The committed `ESM6` fixture is dated March 2024 and is
+  consistent with several delivery years; its docstring previously claimed
+  "June 2026" and no longer does.
+- **Nothing is normalized.** `"es"` and `" ES"` are rejected rather than
+  trimmed or upper-cased. `parse()` is the exact inverse of `canonical()`.
+- **Identity excludes specification and provenance.** No specification type
+  ships — the repository has no authoritative source for one.
+- **Venue is a shallow namespace token**, explicitly not a MIC, exchange group
+  name, or vendor venue code. The limitation is documented rather than papered
+  over with a guessed hierarchy.
+
+**Four defects reproduced and fixed**, each with regression tests:
+
+1. Normalization coerced the instrument symbol with `str()` while duplicate
+   detection compared the raw value, so records carrying `None` and `"None"`
+   had different import identities but one domain instrument — **two
+   conflicting bars for the same period were accepted with `success=True`**, a
+   live hole in ADR-005 that silently double-counted volume.
+2. Pydantic's `model_copy` skipped validation, so an identity could be forged
+   whose `canonical()` emitted a string its own `parse()` rejects.
+3. A `str` subclass with overridden equality split one instrument in two,
+   reproducing defect 1 one level down.
+4. A runtime subclass of `FuturesContractId` passed the executable guard.
+
+**No schema change.** Schema v2 stores one `utf8` `instrument_symbol` column
+and cannot represent venue, product, delivery month, or full year; `"ESM6"`
+cannot be resolved into canonical identity without guessing a venue and a
+decade. `SCHEMA_VERSION` stays at 2, the vertical slice still persists only the
+legacy string, and two tests assert that limit. Full persistence needs a future
+schema v3 with an explicit, operator-declared migration.
+
+Not implemented in this phase: exchange calendars, sessions, rollover,
+continuous futures, back-adjustment, dataset catalog, replay, execution,
+instrument specifications, and any alias registry or vendor symbol parser.
+
 ## Later phases (gated)
 
 Deterministic replay, strategy APIs, execution simulation, experiments, and

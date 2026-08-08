@@ -7,11 +7,21 @@ directory. No mocks, no monkeypatching, no in-memory storage substitutes.
 Until this phase, every one of those components was verified only in
 isolation; these tests are the first proof that they compose.
 
-The committed fixture ``tests/fixtures/esm6_trades.csv`` uses the specific
-futures contract symbol **ESM6** (E-mini S&P 500, June 2026). It is a plain
-string for now: the full futures ``InstrumentId`` model — roots, expiries,
-exchange metadata, rollover — is Phase 2.0, and this interim representation
-must not be mistaken for the final instrument identity architecture. The
+The committed fixture ``tests/fixtures/esm6_trades.csv`` uses the vendor symbol
+**ESM6**. It is a plain string, and it is *only* a string: it is not canonical
+instrument identity, and it does **not** establish a contract year. ``M6``
+abbreviates the delivery year to one digit, so the same symbol denotes June
+2006, 2016, 2026, or 2036, and the fixture's own rows are dated March 2024 —
+consistent with a 2026 listing and equally consistent with a re-used symbol.
+Nothing in this file may be read as evidence that ``ESM6`` means 2026; ADR-009
+requires the full year to be stated explicitly rather than inferred, and no
+code in the repository resolves the abbreviation without an explicit decade.
+
+Canonical identity lives in
+:class:`~quant_research_terminal.domain.futures_contract.FuturesContractId`.
+Schema v2 does not persist it — see
+:func:`test_storage_v2_persists_only_the_legacy_vendor_symbol` below, which
+asserts that limit rather than leaving it to prose. The
 fixture's rows are deliberately out of timestamp order, contain a
 same-timestamp cluster with two *identical* trades, a trailing-zero price,
 and all three trade sides, so a single pass exercises ordering, tiebreaks,
@@ -542,3 +552,76 @@ def test_verification_error_is_exported_and_distinct() -> None:
     # storage defect, and the storage layer's own suite guards those).
     assert issubclass(VerificationError, Exception)
     assert not issubclass(VerificationError, ImportDatasetError)
+
+
+# ==========================================================================
+# Storage schema-v2 compatibility with canonical identity (Phase 2.0, ADR-009)
+#
+# Phase 2.0 introduces canonical futures identity in the domain and does *not*
+# migrate persistence. These tests assert that limit so the claim in the docs
+# is checkable rather than merely written down — and so that any future change
+# to what is persisted must change a test that says why.
+# ==========================================================================
+
+
+def test_storage_v2_persists_only_the_legacy_vendor_symbol(tmp_path: Path) -> None:
+    """A written dataset carries the flat symbol and nothing more.
+
+    No venue column, no product column, no delivery month, no contract year.
+    Canonical identity therefore cannot survive a round trip through schema v2,
+    which is exactly why ADR-009 defers persistence to a future schema decision
+    instead of reconstructing identity from ``"ESM6"`` by guessing.
+    """
+    import pyarrow.parquet as pq  # type: ignore[import-untyped]
+
+    output = tmp_path / "esm6.parquet"
+    _use_case().run(provider=_trade_provider(), request=_request(), output_path=output)
+
+    table = pq.read_table(output)
+
+    assert table.column_names == ["timestamp", "instrument_symbol", "price", "size", "side"]
+    assert set(table.column("instrument_symbol").to_pylist()) == {SYMBOL}
+    assert not {"venue", "product", "root", "contract_month", "contract_year"} & set(
+        table.column_names
+    )
+
+
+def test_schema_version_is_unchanged_by_the_identity_phase(tmp_path: Path) -> None:
+    from quant_research_terminal.data.contracts import SCHEMA_VERSION
+    from quant_research_terminal.data.parquet_store import read_schema_metadata
+
+    assert SCHEMA_VERSION == 2
+
+    output = tmp_path / "esm6.parquet"
+    _use_case().run(provider=_trade_provider(), request=_request(), output_path=output)
+
+    assert read_schema_metadata(output)["schema_version"] == "2"
+
+
+def test_the_stored_symbol_does_not_determine_a_contract_year(tmp_path: Path) -> None:
+    """The fixture must never become evidence that ``ESM6`` means 2026.
+
+    Everything the file records is compatible with several delivery years, so
+    no code may derive one from it. The repository offers exactly one way to
+    expand an abbreviated year, and it refuses to answer without being told the
+    decade.
+    """
+    from quant_research_terminal.data.parquet_store import read_trades
+    from quant_research_terminal.domain.futures_contract import (
+        resolve_abbreviated_contract_year,
+    )
+
+    output = tmp_path / "esm6.parquet"
+    _use_case().run(provider=_trade_provider(), request=_request(), output_path=output)
+    restored = read_trades(output)
+
+    # The observation dates say nothing about the delivery year either.
+    assert all(trade.timestamp.year == 2024 for trade in restored)
+    assert {trade.instrument_symbol for trade in restored} == {"ESM6"}
+
+    # The one expansion API has no default and yields different, equally valid
+    # answers for the different decades a caller might declare.
+    assert resolve_abbreviated_contract_year("6", cycle_start=2020) == 2026
+    assert resolve_abbreviated_contract_year("6", cycle_start=2010) == 2016
+    with pytest.raises(TypeError):
+        resolve_abbreviated_contract_year("6")  # type: ignore[call-arg]

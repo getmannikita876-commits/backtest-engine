@@ -26,6 +26,11 @@ from quant_research_terminal.data_import.event_order import (
     event_ordering_key,
     event_type_precedence,
 )
+from quant_research_terminal.data_import.instrument_semantics import (
+    InstrumentSymbolViolation,
+    check_instrument_symbol,
+    require_instrument_symbol,
+)
 from quant_research_terminal.data_import.normalization import (
     DefaultRecordNormalizer,
     DomainRecord,
@@ -76,6 +81,7 @@ from quant_research_terminal.data_import.time_semantics import (
 from quant_research_terminal.data_import.validation import (
     BAR_IDENTITY_FIELDS,
     DuplicateValidator,
+    InstrumentSymbolValidator,
     OrderingValidator,
     RecordBatchValidator,
     SchemaValidator,
@@ -103,6 +109,8 @@ __all__ = [
     "DuplicateValidator",
     "ImportBatch",
     "ImportRecordType",
+    "InstrumentSymbolValidator",
+    "InstrumentSymbolViolation",
     "MarketDataProvider",
     "OrderingValidator",
     "ProviderCapabilities",
@@ -130,6 +138,7 @@ __all__ = [
     "ValueValidator",
     "bar_availability_timestamp",
     "batch_validation_pipeline",
+    "check_instrument_symbol",
     "classify_timestamp",
     "databento_record_type",
     "decimal_fields",
@@ -141,6 +150,7 @@ __all__ = [
     "is_decimal_like",
     "raw_records_to_import_batch",
     "record_identity",
+    "require_instrument_symbol",
     "require_utc",
     "required_fields",
     "thetadata_record_type",

@@ -19,8 +19,9 @@ than guesses when a value is still unusable. It never repairs data: by this
 stage a defect means a validation stage was skipped, which is a wiring bug
 worth surfacing loudly rather than absorbing quietly. Every check it makes
 therefore delegates to the same
-:mod:`~quant_research_terminal.data_import.time_semantics` and
-:mod:`~quant_research_terminal.data_import.numeric_semantics` rules the
+:mod:`~quant_research_terminal.data_import.time_semantics`,
+:mod:`~quant_research_terminal.data_import.numeric_semantics`, and
+:mod:`~quant_research_terminal.data_import.instrument_semantics` rules the
 validators used, so the two stages cannot drift apart.
 """
 
@@ -30,6 +31,7 @@ from datetime import timedelta
 from typing import Protocol, runtime_checkable
 
 from quant_research_terminal.data_import.contracts import ImportRecordType
+from quant_research_terminal.data_import.instrument_semantics import require_instrument_symbol
 from quant_research_terminal.data_import.numeric_semantics import to_decimal
 from quant_research_terminal.data_import.raw_record import RawRecord
 from quant_research_terminal.data_import.record_fields import (
@@ -117,4 +119,11 @@ class DefaultRecordNormalizer:
 
     @staticmethod
     def _symbol(record: RawRecord) -> str:
-        return str(record.value(INSTRUMENT_FIELD))
+        # Never ``str(...)``. Coercing would give a non-string value a domain
+        # form it does not have: ``None`` became the instrument ``"None"``,
+        # which collided with a record that genuinely carried the text
+        # ``"None"`` while the two had different *import* identities — enough
+        # to slip two conflicting bars for one period past ADR-005's conflict
+        # detection. The rule lives in one place and the validator applies it
+        # first, so reaching an unusable value here means a stage was skipped.
+        return require_instrument_symbol(record.value(INSTRUMENT_FIELD), INSTRUMENT_FIELD)

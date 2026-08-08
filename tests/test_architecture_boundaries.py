@@ -43,17 +43,51 @@ def _module_name(path: Path) -> str:
     return ".".join([ROOT_MODULE, *parts])
 
 
-def _imports(path: Path) -> set[str]:
-    """Return every module name imported by the file at ``path``."""
+def _resolve_relative(module: str, node: ast.ImportFrom) -> str:
+    """Return the absolute package a relative ``from . import x`` refers to.
+
+    ``from .bar import Bar`` inside ``quant_research_terminal.domain.__init__``
+    means ``quant_research_terminal.domain.bar``. Resolving it matters: the
+    checks below match on absolute prefixes, so an unresolved relative import is
+    an invisible import, and a boundary breach written as ``from ..data import
+    x`` would pass every test in this file while violating the rule it claims to
+    enforce.
+
+    ``node.level`` counts leading dots. One dot means the module's own package,
+    so ``level`` parts are dropped from the *package* path — which for a package
+    ``__init__`` is the module name itself, since ``_module_name`` already
+    strips ``__init__``.
+    """
+    parts = module.split(".")
+    package = parts if _is_package_init(module) else parts[:-1]
+    trimmed = package[: len(package) - (node.level - 1)] if node.level > 1 else package
+    return ".".join([*trimmed, node.module]) if node.module else ".".join(trimmed)
+
+
+def _is_package_init(module: str) -> bool:
+    """Return whether ``module`` names a package rather than a plain module."""
+    relative = Path(*module.split(".")[1:])
+    return (PACKAGE_ROOT / relative / "__init__.py").is_file() or module == ROOT_MODULE
+
+
+def _imports(path: Path, module: str) -> set[str]:
+    """Return every module name imported by the file at ``path``.
+
+    Both absolute and relative ``from`` imports are reported, as absolute
+    names.
+    """
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     found: set[str] = set()
 
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             found.update(alias.name for alias in node.names)
-        elif isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
-            found.add(node.module)
-            found.update(f"{node.module}.{alias.name}" for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            base = node.module if node.level == 0 else _resolve_relative(module, node)
+            if not base:
+                continue
+            found.add(base)
+            found.update(f"{base}.{alias.name}" for alias in node.names)
 
     return found
 
@@ -61,7 +95,7 @@ def _imports(path: Path) -> set[str]:
 def _modules_under(prefix: str) -> list[tuple[str, set[str]]]:
     """Return ``(module_name, imported_names)`` for every module under ``prefix``."""
     return [
-        (name, _imports(path))
+        (name, _imports(path, name))
         for path in sorted(PACKAGE_ROOT.rglob("*.py"))
         if (name := _module_name(path)) == prefix or name.startswith(f"{prefix}.")
     ]
@@ -149,12 +183,73 @@ def test_rule_modules_do_not_import_orchestration() -> None:
 
 
 def test_semantics_modules_depend_on_nothing_in_the_import_layer() -> None:
-    # time_semantics and numeric_semantics are the authoritative leaf rules;
-    # they must stay free of every stage that consumes them.
-    for module in ("time_semantics", "numeric_semantics"):
+    # time_semantics, numeric_semantics, and instrument_semantics are the
+    # authoritative leaf rules; they must stay free of every stage that
+    # consumes them.
+    for module in ("time_semantics", "numeric_semantics", "instrument_semantics"):
         _, imported = _modules_under(f"{DATA_IMPORT}.{module}")[0]
         internal = {name for name in imported if name.startswith(f"{DATA_IMPORT}.")}
         assert internal == set()
+
+
+def test_relative_imports_are_resolved_by_the_boundary_checks() -> None:
+    """The checks must see relative imports, or they can be evaded by syntax.
+
+    ``domain/__init__.py`` imports its siblings relatively. If the import graph
+    were built from absolute ``from`` statements only, those edges would be
+    invisible and ``from ..data import x`` in that file would breach the
+    domain-does-not-import-storage rule while every test here still passed.
+    """
+    domain_init = dict(_modules_under(DOMAIN))[DOMAIN]
+
+    assert f"{DOMAIN}.futures_contract" in domain_init
+    assert f"{DOMAIN}.futures_contract.FuturesContractId" in domain_init
+
+
+# --------------------------------------------------------------------------
+# Futures identity (Phase 2.0, ADR-009)
+#
+# Identity belongs at the lowest layer. It must be usable by replay,
+# execution, and cataloguing later without any of them dragging in providers,
+# import infrastructure, or storage.
+# --------------------------------------------------------------------------
+
+IDENTITY_MODULES = (f"{DOMAIN}.futures_contract", f"{DOMAIN}.contract_month")
+
+
+def test_identity_modules_exist_and_are_scanned() -> None:
+    for module in IDENTITY_MODULES:
+        assert _modules_under(module), f"{module} was not scanned"
+
+
+def test_identity_modules_depend_on_nothing_above_the_domain() -> None:
+    # Enumerated rather than expressed as "not storage": the point is that
+    # identity depends on *nothing* upward, so a layer added later is covered
+    # without this test being remembered.
+    for module in IDENTITY_MODULES:
+        _, imported = _modules_under(module)[0]
+        outward = {
+            name
+            for name in imported
+            if name.startswith(f"{ROOT_MODULE}.") and not name.startswith(f"{DOMAIN}.")
+        }
+        assert outward == set(), f"{module} depends outward on {sorted(outward)}"
+
+
+def test_identity_modules_do_not_read_the_wall_clock() -> None:
+    """No current date, time, or timezone may influence an identity.
+
+    A parser that resolves ``ESM6`` using the current decade produces a
+    different identity in 2026 than in 2036 for the same input, which makes
+    stored research irreproducible. The prohibition is structural: the modules
+    do not import the machinery at all.
+    """
+    forbidden = {"datetime", "time", "calendar", "zoneinfo", "random", "uuid", "os", "locale"}
+
+    for module in IDENTITY_MODULES:
+        _, imported = _modules_under(module)[0]
+        roots = {name.split(".")[0] for name in imported}
+        assert roots & forbidden == set(), f"{module} imports {sorted(roots & forbidden)}"
 
 
 # --------------------------------------------------------------------------

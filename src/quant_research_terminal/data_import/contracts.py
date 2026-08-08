@@ -54,6 +54,7 @@ class ValidationIssueCode(StrEnum):
     UNSUPPORTED_SCHEMA_VERSION = "unsupported_schema_version"
     MISSING_REQUIRED_FIELD = "missing_required_field"
     UNKNOWN_FIELD = "unknown_field"
+    INVALID_INSTRUMENT_SYMBOL = "invalid_instrument_symbol"
     NAIVE_DATETIME = "naive_datetime"
     NON_DATETIME_TIMESTAMP = "non_datetime_timestamp"
     NON_UTC_TIMESTAMP = "non_utc_timestamp"

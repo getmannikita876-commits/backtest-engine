@@ -11,6 +11,7 @@ from quant_research_terminal.data_import import (
     CsvMarketDataProvider,
     DuplicateValidator,
     ImportRecordType,
+    InstrumentSymbolValidator,
     OrderingValidator,
     ProviderRequest,
     RawRecord,
@@ -104,6 +105,7 @@ def test_every_validator_satisfies_the_interface() -> None:
     validators = [
         SchemaValidator(),
         TimestampValidator(),
+        InstrumentSymbolValidator(),
         DuplicateValidator(),
         OrderingValidator(),
     ]
@@ -115,7 +117,7 @@ def test_every_validator_satisfies_the_interface() -> None:
 def test_validators_have_distinct_names() -> None:
     names = [validator.name for validator in default_validation_pipeline().validators]
 
-    assert names == ["schema", "timestamp", "value", "duplicate", "ordering"]
+    assert names == ["schema", "timestamp", "instrument", "value", "duplicate", "ordering"]
     assert len(set(names)) == len(names)
 
 
@@ -125,7 +127,7 @@ def test_batch_pipeline_omits_ordering_enforcement() -> None:
     # claimed were ordered.
     names = [validator.name for validator in batch_validation_pipeline().validators]
 
-    assert names == ["schema", "timestamp", "value", "duplicate"]
+    assert names == ["schema", "timestamp", "instrument", "value", "duplicate"]
 
 
 # --------------------------------------------------------------------------

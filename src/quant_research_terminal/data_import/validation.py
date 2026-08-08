@@ -7,15 +7,16 @@ to do about a defect. Deciding — reject the row, keep the first duplicate,
 abort the batch — is policy, and policy belongs to the orchestration layer in
 :mod:`quant_research_terminal.data_import.pipeline`.
 
-============================= =============================================
-Validator                     Question
-============================= =============================================
-:class:`SchemaValidator`      Are the right fields present, and only those?
-:class:`TimestampValidator`   Is every timestamp fixed-offset UTC?
-:class:`ValueValidator`       Are prices, sizes, and OHLC internally sound?
-:class:`DuplicateValidator`   Does any record repeat an earlier identity?
-:class:`OrderingValidator`    Do timestamps advance monotonically?
-============================= =============================================
+================================== ========================================
+Validator                          Question
+================================== ========================================
+:class:`SchemaValidator`           Are the right fields present, and only those?
+:class:`TimestampValidator`        Is every timestamp fixed-offset UTC?
+:class:`InstrumentSymbolValidator` Does the record name an instrument at all?
+:class:`ValueValidator`            Are prices, sizes, and OHLC internally sound?
+:class:`DuplicateValidator`        Does any record repeat an earlier identity?
+:class:`OrderingValidator`         Do timestamps advance monotonically?
+================================== ========================================
 
 Each validator reads ``record.record_type`` from the record itself rather than
 being told what to expect, so a validator instance is stateless, reusable, and
@@ -40,6 +41,13 @@ from quant_research_terminal.data_import.contracts import (
     ValidationIssue,
     ValidationIssueCode,
     ValidationSeverity,
+)
+from quant_research_terminal.data_import.instrument_semantics import (
+    check_instrument_symbol,
+    require_instrument_symbol,
+)
+from quant_research_terminal.data_import.instrument_semantics import (
+    violation_message as instrument_violation_message,
 )
 from quant_research_terminal.data_import.numeric_semantics import (
     NumericViolation,
@@ -218,9 +226,12 @@ def record_identity(record: RawRecord) -> tuple[object, ...] | None:
     Returns:
         The identity tuple, or ``None`` when the record cannot participate in
         comparison. ``None`` is returned when the record type has no
-        attribute-based identity, when a required field is missing, or when an
-        identity value is unhashable. The latter two are reported by other
-        validators, so returning ``None`` here avoids a duplicate diagnosis.
+        attribute-based identity, when a required field is missing, when the
+        instrument field does not name an instrument, or when an identity value
+        is unhashable. All but the first are reported by other validators, so
+        returning ``None`` here avoids a duplicate diagnosis — and a
+        ``duplicate_row`` warning promising that "one copy will be discarded by
+        policy" would be false for rows that are all being rejected anyway.
     """
     if record.record_type in UNIDENTIFIABLE_RECORD_TYPES:
         return None
@@ -228,8 +239,27 @@ def record_identity(record: RawRecord) -> tuple[object, ...] | None:
     if not record.has_fields(required_fields(record.record_type)):
         return None
 
+    if check_instrument_symbol(record.value(INSTRUMENT_FIELD)) is not None:
+        # The instrument symbol validator owns this diagnosis. Comparing the
+        # unusable value here would also be unsound: normalization no longer
+        # coerces, so such a record has no domain form to be a duplicate of.
+        return None
+
     fields = _identity_fields(record.record_type)
-    identity = (record.record_type.value, *(record.value(field) for field in fields))
+    # The instrument component goes through the same rule normalization uses,
+    # so the value compared here is exactly the value the domain object will
+    # hold. When the two disagreed, records that were distinct to this function
+    # became one instrument downstream, and conflicting bars for a single period
+    # were accepted together. See ADR-009.
+    identity = (
+        record.record_type.value,
+        *(
+            require_instrument_symbol(record.value(field), field)
+            if field == INSTRUMENT_FIELD
+            else record.value(field)
+            for field in fields
+        ),
+    )
     try:
         hash(identity)
     except TypeError:
@@ -348,6 +378,61 @@ class TimestampValidator:
                     message=status_message(status),
                     row_index=record.source_index,
                     field_name=TIMESTAMP_FIELD,
+                )
+            )
+        return tuple(issues)
+
+
+class InstrumentSymbolValidator:
+    """Checks that each record names an instrument.
+
+    Every record type carries ``instrument_symbol``, and every downstream
+    concept — bar identity, quote identity, storage partitioning, and every
+    future reference to a contract — is keyed on it. A value that is not a
+    string, or a string with nothing but whitespace in it, names no instrument.
+
+    Reporting it here rather than letting normalization cope is what keeps two
+    stages from disagreeing about what an instrument is. When normalization
+    coerced with ``str()``, a record carrying ``None`` and one carrying
+    ``"None"`` had different *import* identities but the same *domain*
+    instrument, so two bars for one period with conflicting volumes were
+    accepted together with ``success=True`` — the exact silent double-counting
+    ADR-005 exists to prevent, reached through the instrument field. See
+    :mod:`~quant_research_terminal.data_import.instrument_semantics` and
+    ADR-009.
+
+    The rule is deliberately narrow: it rejects unusable values, not
+    unfashionable spellings. ``" ESM6 "`` and ``"ESM6"`` remain two distinct
+    instruments, because trimming them into one would be exactly the silent
+    identity merge this layer must not perform.
+
+    A record missing the field entirely is left to :class:`SchemaValidator`.
+    """
+
+    @property
+    def name(self) -> str:
+        """Return the validator identifier."""
+        return "instrument"
+
+    def validate(self, records: Sequence[RawRecord]) -> tuple[ValidationIssue, ...]:
+        """Report records whose instrument field cannot name an instrument."""
+        issues: list[ValidationIssue] = []
+        for record in records:
+            if INSTRUMENT_FIELD not in record.fields:
+                # Absence is the schema validator's diagnosis, not ours.
+                continue
+
+            violation = check_instrument_symbol(record.value(INSTRUMENT_FIELD))
+            if violation is None:
+                continue
+
+            issues.append(
+                _issue(
+                    severity=ValidationSeverity.ERROR,
+                    code=ValidationIssueCode.INVALID_INSTRUMENT_SYMBOL,
+                    message=instrument_violation_message(violation, INSTRUMENT_FIELD),
+                    row_index=record.source_index,
+                    field_name=INSTRUMENT_FIELD,
                 )
             )
         return tuple(issues)
@@ -757,6 +842,7 @@ def _core_validators(*, strict_fields: bool) -> tuple[RecordBatchValidator, ...]
     return (
         SchemaValidator(strict_fields=strict_fields),
         TimestampValidator(),
+        InstrumentSymbolValidator(),
         ValueValidator(),
         DuplicateValidator(),
     )
@@ -766,8 +852,9 @@ def default_validation_pipeline(*, strict_fields: bool = True) -> ValidationPipe
     """Build the pipeline for a provider record stream.
 
     Schema runs first so that later validators can rely on field presence, then
-    timestamps, then values, then duplicates, then ordering. The order affects
-    only the sequence of reported issues, never whether a defect is found.
+    timestamps, then the instrument symbol, then values, then duplicates, then
+    ordering. The order affects only the sequence of reported issues, never
+    whether a defect is found.
 
     Ordering is enforced here because a provider stream is consumed in the
     order it arrives: nothing downstream will re-sort it, so a record that
