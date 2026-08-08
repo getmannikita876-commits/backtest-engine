@@ -720,16 +720,57 @@ distinct from "we did not understand the code it published".
 See the assumption register at the top of this section. Nothing is verified;
 the provider is experimental.
 
+## Instrument symbol rules (approved, ADR-009)
+
+Every record type carries `instrument_symbol`, and every downstream concept —
+bar identity, quote identity, and every future reference to a contract — is
+keyed on it. The rule lives in `data_import/instrument_semantics.py`, a leaf
+module alongside `time_semantics` and `numeric_semantics`.
+
+| Condition | Code | Severity |
+| --- | --- | --- |
+| Not a string (`None`, `int`, `bool`, list, …) | `invalid_instrument_symbol` | ERROR |
+| A string with no non-whitespace character | `invalid_instrument_symbol` | ERROR |
+
+A record missing the field entirely is the schema validator's diagnosis, and a
+record whose symbol is unusable has **no duplicate identity** — a `duplicate_row`
+warning promising that "one copy will be discarded by policy" would be false for
+rows that are all being rejected.
+
+**Why the rule exists.** Normalization used to build domain objects with
+`str(record.value("instrument_symbol"))` while duplicate detection compared the
+**raw** value. A record carrying `None` and one carrying `"None"` therefore had
+different import identities but one domain instrument, so two bars for the same
+period with different volumes were accepted together with `success=True` — the
+silent double-counting ADR-005 exists to prevent, reached through the instrument
+field. The same held for a `str` subclass with overridden equality. Duplicate
+identity and normalization now take the value through **one** function that
+returns the exact `str` the domain will hold, so the two cannot disagree.
+
+**Deliberately narrow.** The rule rejects values that name no instrument; it does
+not reject spellings. `" ESM6 "` and `"ESM6"` remain **two distinct instruments**
+here, and `"esm6"` is a third. Merging them would be exactly the silent identity
+change this layer must not perform. Canonical identity is a separate, strictly
+validated type (`FuturesContractId`, ADR-009) rather than a tightened string;
+narrowing the legacy field further would change what an already-written schema-v2
+file means on read-back, which is a storage decision.
+
+**The symbol is a vendor alias, not identity.** Providers disagree about
+spelling, and no vendor symbol carries a venue or a full contract year. Nothing
+in the import layer converts a symbol into canonical identity, and `"ESM6"` is
+never resolved to 2026 — see ADR-009.
+
 ## Validation composition
 
 Two compositions share the same validator instances:
 
-- **Stream** (`default_validation_pipeline`) — schema, timestamp, value,
-  duplicate, **ordering**. A provider stream is consumed in arrival order and
-  nothing re-sorts it, so a record moving backwards in time is a genuine defect.
-- **Batch** (`batch_validation_pipeline`) — schema, timestamp, value,
-  duplicate. Ordering is omitted because the batch API's contract is to *sort*
-  its output, not to reject unsorted input.
+- **Stream** (`default_validation_pipeline`) — schema, timestamp, instrument,
+  value, duplicate, **ordering**. A provider stream is consumed in arrival order
+  and nothing re-sorts it, so a record moving backwards in time is a genuine
+  defect.
+- **Batch** (`batch_validation_pipeline`) — schema, timestamp, instrument,
+  value, duplicate. Ordering is omitted because the batch API's contract is to
+  *sort* its output, not to reject unsorted input.
 
 Validators are independent but stay silent where another owns the diagnosis: a
 record missing its timestamp column is reported once by the schema validator,

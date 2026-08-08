@@ -20,12 +20,43 @@ correct.
 | CSV provider | implemented |
 | Databento archived delimited export decoding | implemented |
 | ThetaData archived export decoding | **experimental, unverified** |
+| Futures contract identity in the **domain** (`FuturesContractId`) | implemented |
+| Futures contract identity in **storage** | **not implemented** — needs schema v3 |
+
+## Futures instrument identity
+
+A specific listed contract is `FuturesContractId` — a venue, a product root, a
+delivery month, and a **full four-digit year**, canonically `CME:ES:M2026`. See
+`docs/adr/ADR-009-futures-contract-identity.md`.
+
+- `ES` is a product and is **not executable**; only a `FuturesContractId`
+  passes `require_listed_contract`. A continuous or back-adjusted series must be
+  its own type and fails that guard.
+- **`ESM6` is never expanded to 2026 by inference.** The one function that
+  expands an abbreviated year requires an explicit decade and has no default, so
+  no identity can depend on the current date. This holds for the committed
+  `ESM6` fixture too, whose rows are dated March 2024 and which establishes
+  nothing about the delivery year.
+- Values are **rejected, never normalized**: `"es"` and `" ES"` are errors, so
+  two spellings cannot silently become one instrument.
+- Identity excludes specification (tick size, multiplier, currency, fees,
+  expiry dates) and provenance. Neither is modelled.
+
+**Storage still persists only the legacy symbol string.** Schema v2 has one
+`utf8` `instrument_symbol` column, which carries no venue and no full year, so
+canonical identity cannot be reconstructed from a stored file without guessing.
+`SCHEMA_VERSION` remains 2 and existing files are unchanged in meaning.
 
 ## What is not implemented
 
 Replay, execution, strategies, portfolio, options, Monte Carlo, prop-firm
 evaluation, DuckDB, dataset partitioning or catalogue, provider registry, live
 or historical vendor APIs, credential handling, and experiment tracking.
+
+Also not implemented: exchange calendars and trading sessions, rollover,
+continuous futures and back-adjustment, instrument specifications, any vendor
+symbol-to-identity alias registry, and persistence of canonical instrument
+identity.
 
 Storage writes and reads single-record-type Parquet files by path. There is no
 catalogue, no partitioning, and no performance claim.

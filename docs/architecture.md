@@ -17,10 +17,12 @@ UI -> Application -> Data Import -> Storage -> Domain
   Where an invariant can be made structural it is: a bar's availability time is
   a derived property rather than a stored field, so a bar that would be visible
   before its interval closes cannot be constructed at all. Closed vocabularies
-  are enums (`TradeSide`), not strings. The **canonical numeric envelope** lives
-  here too (`domain/numeric.py`) and is enforced on construction, so a
-  constructible domain object is a storage-encodable one. Storage and the import
-  layer both consume it; neither defines a numeric rule of its own.
+  are enums (`TradeSide`, `ContractMonth`), not strings. The **canonical numeric
+  envelope** lives here too (`domain/numeric.py`) and is enforced on
+  construction, so a constructible domain object is a storage-encodable one.
+  Storage and the import layer both consume it; neither defines a numeric rule
+  of its own. **Canonical futures identity** (`domain/futures_contract.py`)
+  lives here for the same reason — see below.
 - **Storage** (`data/`) — storage contracts and Parquet persistence. Converts
   domain models into deterministic Arrow rows with explicit schema metadata and
   fixed-point decimal encoding, and reads and writes single-record-type Parquet
@@ -65,9 +67,16 @@ The engine never depends on a specific vendor: every provider satisfies the same
 so resources are released deterministically rather than by garbage collection.
 
 The approved import rules — stream ownership, batch-fatal schema versions,
-timestamp semantics, quantity positivity, duplicate and bar-conflict handling
-(ADR-005), and the complete event ordering key — are recorded in
-`docs/data-import.md`.
+timestamp semantics, quantity positivity, instrument-symbol usability
+(ADR-009), duplicate and bar-conflict handling (ADR-005), and the complete
+event ordering key — are recorded in `docs/data-import.md`.
+
+Leaf rule modules (`time_semantics`, `numeric_semantics`,
+`instrument_semantics`) each own one question and depend on no stage that
+consumes them, so a validator and a normalizer can never disagree about the
+same rule. They disagreed once: normalization coerced an instrument symbol with
+`str()` while duplicate detection compared the raw value, which let two
+conflicting bars for one period pass as distinct records (ADR-009).
 
 Vendor coverage is deliberately narrow. The Databento and ThetaData providers
 decode **archived delimited exports only**: no binary DBN, no API acquisition,
@@ -101,6 +110,60 @@ derive availability time from them, so a completed bar cannot be observed
 before its interval closes. See `docs/adr/ADR-002-bar-availability-time.md`.
 Storage is at `SCHEMA_VERSION = 2`; version-1 data is rejected rather than
 migrated, because a version-1 bar records no interval.
+
+## Futures instrument identity
+
+A specific listed futures contract is identified by
+`FuturesContractId` in `domain/futures_contract.py`, not by a symbol string.
+See `docs/adr/ADR-009-futures-contract-identity.md`.
+
+```
+Venue                  a market namespace token
+  └── FuturesProduct   venue + product root            e.g. CME:ES
+        └── FuturesContractId   product + delivery month + FULL year
+                                canonical: CME:ES:M2026
+```
+
+The distinctions the model exists to keep apart:
+
+| Concept | Type | Executable? |
+| --- | --- | --- |
+| Product / root (`ES`) | `FuturesProduct` | **no** |
+| Listed contract (`ESM6`) | `FuturesContractId` | yes |
+| Vendor alias (`ES1!`, a numeric id) | none — an alias is not an identity | — |
+| Synthetic / continuous series | not implemented; must be its **own** type | **no** |
+
+`require_listed_contract(value)` is the guard execution-side code calls; only a
+`FuturesContractId` passes it.
+
+Properties, all tested rather than asserted in prose:
+
+- **The full contract year is always explicit.** `ESM6` is an abbreviation and
+  is never expanded by inference. The one expansion function,
+  `resolve_abbreviated_contract_year`, requires the caller to state the decade
+  and has no default, so no code path can acquire a dependency on the current
+  date. `ESM6` does **not** mean 2026 here — including in the committed fixture.
+- **Nothing is normalized.** `"es"` and `" ES"` are rejected, never trimmed or
+  upper-cased, so two source spellings cannot silently become one instrument.
+- **Canonical serialization is deterministic** — byte-identical across processes
+  under different `PYTHONHASHSEED` values, independent of locale and timezone —
+  and `parse()` is its exact inverse, neither wider nor narrower.
+- **Identity excludes specification** (tick size, multiplier, currency, fees,
+  margin, settlement, hours, expiry dates) **and provenance** (provider, file,
+  row, dataset). Neither is modelled yet; both are separate dimensions.
+- **Venue is a deliberately shallow namespace token** — not a MIC, not an
+  exchange group name, not a vendor venue code. The repository has no
+  authoritative venue registry, and inventing a hierarchy would be fake
+  precision. Using one token per market consistently is currently the
+  operator's responsibility.
+
+**Storage does not persist canonical identity.** Schema v2 stores one `utf8`
+`instrument_symbol` column, and `"ESM6"` carries no venue and no full year, so
+canonical identity cannot be reconstructed from a stored file without guessing.
+`SCHEMA_VERSION` is unchanged at 2; domain events and Parquet still carry the
+legacy string. Full persistence requires a future schema v3 with an explicit
+migration. Not implemented, and not claimed: continuous futures, rollover,
+back-adjustment, exchange calendars, and instrument specifications.
 
 ## Research invariants
 
