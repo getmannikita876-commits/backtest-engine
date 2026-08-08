@@ -282,6 +282,31 @@ part of a reproducibility platform. See ADR-008 (**Accepted**).
 - CI installs through the constraints file and prints interpreter, platform,
   frozen package versions, and timezone-database resolution on both runners.
 
+## Phase 1.9 — Application layer and first vertical slice (in progress)
+
+The first source-code path connecting the individually verified layers. See
+ADR-007 (**Accepted**).
+
+- New `application/` package: `ImportDatasetUseCase` orchestrates provider →
+  validation → normalization → deterministic ordering → Parquet write →
+  read-back → structural equality verification → `ImportDatasetResult`.
+  Orchestration only; every rule stays in its owning layer.
+- **Transaction boundary:** the dataset is staged beside the target, verified
+  by reading it back through the real read path, then promoted with one
+  atomic replace. No failure mode creates or replaces the target; an existing
+  dataset survives every failed run byte-for-byte.
+- One record type per dataset, enforced before validation; mixed streams are
+  refused with an application error.
+- True integration tests over a committed `ESM6` CSV fixture (specific
+  contract symbol — an interim string pending the Phase 2.0 instrument
+  model): trades, quotes, bars, conflicting bars, invalid values, duplicate
+  headers, empty sources, stream closure, existing-target preservation, and
+  repeat-run determinism including byte identity in the pinned environment.
+- **Honest limits:** records are materialized in memory before validation
+  (documented, unmeasured, no tick-scale claim); provenance does not survive
+  into domain objects or Parquet (recorded for Phases 2.0/2.3); no dataset
+  catalog, no manifest, no rollover, no replay, no UI integration yet.
+
 ## Later phases (gated)
 
 Deterministic replay, strategy APIs, execution simulation, experiments, and
