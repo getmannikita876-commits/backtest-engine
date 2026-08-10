@@ -10,7 +10,12 @@ Dependencies point inward, and never the other way:
 
 ```
 UI -> Application -> Data Import -> Storage -> Domain
+                                   Calendars -> Domain
 ```
+
+`calendars/` is a data package beside the pipeline: it ships versioned
+calendar-definition resources and their strict loader, depends only on the
+domain, and nothing in the domain depends back on it.
 
 - **Domain** (`domain/`) — immutable models with validation only: no IO, no GUI,
   no provider-specific code. It is the foundation and depends on nothing above it.
@@ -164,6 +169,44 @@ canonical identity cannot be reconstructed from a stored file without guessing.
 legacy string. Full persistence requires a future schema v3 with an explicit
 migration. Not implemented, and not claimed: continuous futures, rollover,
 back-adjustment, exchange calendars, and instrument specifications.
+
+## Exchange calendar
+
+The calendar subsystem (ADR-010) separates authored facts from generic
+mechanics, and physical exchange state from research labels:
+
+```
+CalendarDefinition            TOML data + strict models (facts, evidence refs)
+      │ materialize()         deterministic; the only local-time arithmetic
+      ▼
+MaterializedCalendar          explicit half-open [start, end) UTC windows,
+      │                       content-hashed for reproducibility pinning
+      ▼
+CalendarResolver              pure bisect lookups; UTC-only inputs;
+                              no tzdb dependence at query time
+```
+
+- **Facts are data.** Every schedule fact — weekly session windows, holiday
+  exceptions, early closes — lives in a versioned TOML definition
+  (`calendars/definitions/`) with per-rule verification status and evidence
+  citations; the narrative register is `docs/calendar-evidence.md`. Engine
+  code contains no exchange's schedule.
+- **Exchange tradability ≠ research segmentation.** `ExchangeTradingState`
+  (TRADING / HALT / MAINTENANCE / CLOSED) describes what the matching engine
+  was doing. RTH/ETH-style research sessions are a future layer *over* the
+  calendar and can never change tradability.
+- **`TradingDate` is assigned, never derived.** The type rejects `datetime`
+  outright, and windows carry CME's own trade-date labels — a Sunday-evening
+  session can belong to Tuesday across a holiday, which no date arithmetic
+  produces.
+- **Unknown is unsupported.** Instants outside the materialized coverage and
+  dates outside the supported range raise typed errors; nothing extrapolates
+  a "normal day". The shipped `CME_EQUITY_INDEX` v1 supports trading dates
+  2023-05-22 … 2023-12-29, the exact span its CME evidence covers.
+- **DST is explicit.** Rule boundaries naming nonexistent or ambiguous local
+  times fail materialization with typed errors; declarative tzdb probes make
+  a divergent zoneinfo source fail loudly; the resolver itself never touches
+  local time.
 
 ## Research invariants
 

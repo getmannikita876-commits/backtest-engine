@@ -22,6 +22,8 @@ correct.
 | ThetaData archived export decoding | **experimental, unverified** |
 | Futures contract identity in the **domain** (`FuturesContractId`) | implemented |
 | Futures contract identity in **storage** | **not implemented** — needs schema v3 |
+| Exchange-calendar engine (definitions → materialized UTC windows → resolver) | implemented |
+| CME equity-index (ES/NQ) calendar facts | **verified for trading dates 2023-05-22 … 2023-12-29 only** |
 
 ## Futures instrument identity
 
@@ -47,16 +49,44 @@ delivery month, and a **full four-digit year**, canonically `CME:ES:M2026`. See
 canonical identity cannot be reconstructed from a stored file without guessing.
 `SCHEMA_VERSION` remains 2 and existing files are unchanged in meaning.
 
+## Exchange calendar
+
+The calendar answers, for a UTC instant: exchange state (trading / halt /
+maintenance / closed), the **calendar-assigned** `TradingDate`, the current
+window's bounds, the next transition, and the pinned calendar identity
+(`CalendarId`, `CalendarVersion`, materialized content hash). See
+`docs/adr/ADR-010-exchange-calendar.md`.
+
+The **mechanics** and the **verified facts** are different things:
+
+- Mechanics (implemented, generic): declarative TOML definitions validated by
+  strict models, a deterministic materializer producing explicit half-open
+  `[start, end)` UTC windows, typed rejection of DST-nonexistent and
+  DST-ambiguous rule boundaries, tzdb probes that fail materialization loudly
+  on a divergent zone database, a content hash pinning the materialized
+  schedule, and a resolver that performs no timezone arithmetic at query time.
+- Facts (`CME_EQUITY_INDEX` v1): the CME Globex EQUITIES schedule —
+  Sun–Fri 17:00–16:00 CT with the 15:15–15:30 CT daily halt and all six 2023
+  holiday exceptions — **verified against official CME publications for
+  trading dates 2023-05-22 through 2023-12-29 and no further**. Outside that
+  range the calendar refuses to answer rather than extrapolating; extending it
+  is evidence work, recorded in `docs/calendar-evidence.md`.
+
+A trading date is assigned by the calendar, never derived from a timestamp:
+the Sunday-evening session before Memorial Day 2023 belongs to trading date
+**Tuesday** 2023-05-30, per CME's own schedule.
+
 ## What is not implemented
 
 Replay, execution, strategies, portfolio, options, Monte Carlo, prop-firm
 evaluation, DuckDB, dataset partitioning or catalogue, provider registry, live
 or historical vendor APIs, credential handling, and experiment tracking.
 
-Also not implemented: exchange calendars and trading sessions, rollover,
-continuous futures and back-adjustment, instrument specifications, any vendor
-symbol-to-identity alias registry, and persistence of canonical instrument
-identity.
+Also not implemented: research session segmentation (RTH/ETH labels over the
+calendar), instrument→calendar mapping, calendar facts outside the verified
+2023 range, rollover, continuous futures and back-adjustment, instrument
+specifications, any vendor symbol-to-identity alias registry, and persistence
+of canonical instrument identity.
 
 Storage writes and reads single-record-type Parquet files by path. There is no
 catalogue, no partitioning, and no performance claim.

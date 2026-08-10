@@ -357,6 +357,39 @@ Not implemented in this phase: exchange calendars, sessions, rollover,
 continuous futures, back-adjustment, dataset catalog, replay, execution,
 instrument specifications, and any alias registry or vendor symbol parser.
 
+## Phase 2.1 — Exchange calendar and session model (complete for the verified range)
+
+Deterministic exchange-calendar foundation. See ADR-010 and
+`docs/calendar-evidence.md`.
+
+- **Facts as data:** versioned TOML calendar definitions with per-rule
+  evidence citations and verification status; a strict stdlib-`tomllib`
+  loader; no schedule fact in Python code.
+- **Deterministic materialization:** definition → explicit half-open
+  `[start, end)` UTC windows at microsecond precision; typed rejection of
+  DST-nonexistent and DST-ambiguous boundaries; declarative tzdb probes that
+  fail loudly on a divergent zone database; a canonical content hash pinning
+  the materialized schedule (identity, version, trading-date range, coverage,
+  windows).
+- **UTC-only resolution:** `CalendarResolver` answers state
+  (TRADING/HALT/MAINTENANCE/CLOSED), calendar-assigned `TradingDate`, window
+  bounds, next transition, and pinned identity — with no timezone arithmetic
+  at query time. Inverse lookup returns the possibly-multiple UTC windows of
+  one trading date.
+- **Verified facts:** `CME_EQUITY_INDEX` v1 encodes the CME Globex EQUITIES
+  schedule for trading dates **2023-05-22 … 2023-12-29** from official CME
+  publications (weekly hours + daily halt, six holiday exception sets, the
+  November DST transition in range). Unknown ranges are unsupported, never
+  guessed.
+- **Falsification record:** two adversarial passes; defects D1 (trading-date
+  range outside the content hash) and D2 (unbounded exception-window
+  locality) fixed with regression tests.
+
+Explicitly not in this phase: research segmentation (RTH/ETH), rollover and
+continuous futures, instrument→calendar mapping, schema changes (storage
+stays at v2), replay, execution, and calendar facts outside the verified
+range.
+
 ## Later phases (gated)
 
 Deterministic replay, strategy APIs, execution simulation, experiments, and

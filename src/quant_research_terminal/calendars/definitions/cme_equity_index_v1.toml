@@ -1,0 +1,695 @@
+# CME_EQUITY_INDEX calendar definition, version 1.
+#
+# Declarative schedule facts for the CME Globex EQUITIES product group (the
+# schedule class that includes E-mini S&P 500 (ES) and E-mini Nasdaq-100 (NQ)
+# futures). Every rule and dated exception cites evidence records defined at
+# the bottom of this file; the durable narrative register with retrieval
+# details is docs/calendar-evidence.md. No fact in this file was authored from
+# memory: unknown schedule semantics are expressed by the supported range
+# ending, never by an invented "normal day".
+#
+# All wall times are exchange-local America/Chicago ("U.S. Central Time" in
+# CME's own documents; America/Chicago is the canonical IANA zone for U.S.
+# Central Time). Released versions of this file are immutable: corrections
+# happen in a new version with a new materialized content hash.
+
+schema = "qrt-calendar-definition/1"
+
+[calendar]
+id = "CME_EQUITY_INDEX"
+version = 1
+timezone = "America/Chicago"
+first_trading_date = 2023-05-22
+last_trading_date = 2023-12-29
+
+# ---------------------------------------------------------------------------
+# Declarative tzdb probes: what the effective timezone database must say for
+# America/Chicago around the supported range. These are tzdb facts, not CME
+# facts; they make a divergent or stale zoneinfo source fail materialization
+# loudly instead of silently shifting every window.
+# ---------------------------------------------------------------------------
+
+[[timezone_probe]]  # standard time (CST, UTC-6) in winter 2023
+utc_instant = 2023-01-15T12:00:00Z
+expected_utc_offset_minutes = -360
+
+[[timezone_probe]]  # daylight time (CDT, UTC-5) in summer 2023
+utc_instant = 2023-06-15T12:00:00Z
+expected_utc_offset_minutes = -300
+
+[[timezone_probe]]  # instant before the 2023 spring-forward (2023-03-12 02:00 CST)
+utc_instant = 2023-03-12T07:59:59Z
+expected_utc_offset_minutes = -360
+
+[[timezone_probe]]  # instant at/after the 2023 spring-forward transition
+utc_instant = 2023-03-12T08:00:00Z
+expected_utc_offset_minutes = -300
+
+[[timezone_probe]]  # instant before the 2023 fall-back (2023-11-05 02:00 CDT)
+utc_instant = 2023-11-05T06:59:59Z
+expected_utc_offset_minutes = -300
+
+[[timezone_probe]]  # instant at/after the 2023 fall-back transition
+utc_instant = 2023-11-05T07:00:00Z
+expected_utc_offset_minutes = -360
+
+# ---------------------------------------------------------------------------
+# Recurring weekly session, keyed by the weekday of the TRADING DATE.
+# Day offsets are civil-day offsets from the trading date: -1 is the calendar
+# day before it. A trading date's session opens at 17:00 the previous day,
+# halts 15:15-15:30 on the trading date, and finally closes at 16:00
+# (Sunday-Friday 6:00 p.m. - 5:00 p.m. ET with a trading halt 4:15-4:30 p.m.
+# ET, per CME's FAQ). Saturday and Sunday are never trading dates.
+# ---------------------------------------------------------------------------
+
+[[weekly.monday]]  # Sunday pre-open (order entry, no matching)
+state = "halt"
+start_day_offset = -1
+start_time = 16:00:00
+end_day_offset = -1
+end_time = 17:00:00
+verification = "corroborated"
+evidence = ["cme-memorial-day-2023-schedule", "cme-labor-day-2023-schedule", "cme-christmas-2023-schedule"]
+
+[[weekly.monday]]
+state = "trading"
+start_day_offset = -1
+start_time = 17:00:00
+end_day_offset = 0
+end_time = 15:15:00
+verification = "verified-primary"
+evidence = ["cme-micro-emini-faq-2023-12", "cme-micro-emini-faq-2021-01"]
+
+[[weekly.monday]]  # daily trading halt, 4:15-4:30 p.m. ET
+state = "halt"
+start_day_offset = 0
+start_time = 15:15:00
+end_day_offset = 0
+end_time = 15:30:00
+verification = "verified-primary"
+evidence = ["cme-micro-emini-faq-2023-12", "cme-micro-emini-faq-2021-01"]
+
+[[weekly.monday]]
+state = "trading"
+start_day_offset = 0
+start_time = 15:30:00
+end_day_offset = 0
+end_time = 16:00:00
+verification = "verified-primary"
+evidence = ["cme-micro-emini-faq-2023-12", "cme-micro-emini-faq-2021-01"]
+
+[[weekly.tuesday]]  # weekday pre-open (order entry, no matching)
+state = "halt"
+start_day_offset = -1
+start_time = 16:45:00
+end_day_offset = -1
+end_time = 17:00:00
+# Corroborated, not verified-primary: the 16:45 pre-open is stated by the
+# holiday PDFs for specific transition days; its application to every
+# ordinary weekday is inferred from the instances' consistency — the same
+# honest downgrade the Sunday 16:00 pre-open carries.
+verification = "corroborated"
+evidence = ["cme-memorial-day-2023-schedule", "cme-thanksgiving-2023-schedule"]
+
+[[weekly.tuesday]]
+state = "trading"
+start_day_offset = -1
+start_time = 17:00:00
+end_day_offset = 0
+end_time = 15:15:00
+verification = "verified-primary"
+evidence = ["cme-micro-emini-faq-2023-12", "cme-micro-emini-faq-2021-01"]
+
+[[weekly.tuesday]]
+state = "halt"
+start_day_offset = 0
+start_time = 15:15:00
+end_day_offset = 0
+end_time = 15:30:00
+verification = "verified-primary"
+evidence = ["cme-micro-emini-faq-2023-12", "cme-micro-emini-faq-2021-01"]
+
+[[weekly.tuesday]]
+state = "trading"
+start_day_offset = 0
+start_time = 15:30:00
+end_day_offset = 0
+end_time = 16:00:00
+verification = "verified-primary"
+evidence = ["cme-micro-emini-faq-2023-12", "cme-micro-emini-faq-2021-01"]
+
+[[weekly.wednesday]]
+state = "halt"
+start_day_offset = -1
+start_time = 16:45:00
+end_day_offset = -1
+end_time = 17:00:00
+# Corroborated, not verified-primary: the 16:45 pre-open is stated by the
+# holiday PDFs for specific transition days; its application to every
+# ordinary weekday is inferred from the instances' consistency — the same
+# honest downgrade the Sunday 16:00 pre-open carries.
+verification = "corroborated"
+evidence = ["cme-memorial-day-2023-schedule", "cme-thanksgiving-2023-schedule"]
+
+[[weekly.wednesday]]
+state = "trading"
+start_day_offset = -1
+start_time = 17:00:00
+end_day_offset = 0
+end_time = 15:15:00
+verification = "verified-primary"
+evidence = ["cme-micro-emini-faq-2023-12", "cme-micro-emini-faq-2021-01"]
+
+[[weekly.wednesday]]
+state = "halt"
+start_day_offset = 0
+start_time = 15:15:00
+end_day_offset = 0
+end_time = 15:30:00
+verification = "verified-primary"
+evidence = ["cme-micro-emini-faq-2023-12", "cme-micro-emini-faq-2021-01"]
+
+[[weekly.wednesday]]
+state = "trading"
+start_day_offset = 0
+start_time = 15:30:00
+end_day_offset = 0
+end_time = 16:00:00
+verification = "verified-primary"
+evidence = ["cme-micro-emini-faq-2023-12", "cme-micro-emini-faq-2021-01"]
+
+[[weekly.thursday]]
+state = "halt"
+start_day_offset = -1
+start_time = 16:45:00
+end_day_offset = -1
+end_time = 17:00:00
+# Corroborated, not verified-primary: the 16:45 pre-open is stated by the
+# holiday PDFs for specific transition days; its application to every
+# ordinary weekday is inferred from the instances' consistency — the same
+# honest downgrade the Sunday 16:00 pre-open carries.
+verification = "corroborated"
+evidence = ["cme-memorial-day-2023-schedule", "cme-thanksgiving-2023-schedule"]
+
+[[weekly.thursday]]
+state = "trading"
+start_day_offset = -1
+start_time = 17:00:00
+end_day_offset = 0
+end_time = 15:15:00
+verification = "verified-primary"
+evidence = ["cme-micro-emini-faq-2023-12", "cme-micro-emini-faq-2021-01"]
+
+[[weekly.thursday]]
+state = "halt"
+start_day_offset = 0
+start_time = 15:15:00
+end_day_offset = 0
+end_time = 15:30:00
+verification = "verified-primary"
+evidence = ["cme-micro-emini-faq-2023-12", "cme-micro-emini-faq-2021-01"]
+
+[[weekly.thursday]]
+state = "trading"
+start_day_offset = 0
+start_time = 15:30:00
+end_day_offset = 0
+end_time = 16:00:00
+verification = "verified-primary"
+evidence = ["cme-micro-emini-faq-2023-12", "cme-micro-emini-faq-2021-01"]
+
+[[weekly.friday]]
+state = "halt"
+start_day_offset = -1
+start_time = 16:45:00
+end_day_offset = -1
+end_time = 17:00:00
+# Corroborated, not verified-primary: the 16:45 pre-open is stated by the
+# holiday PDFs for specific transition days; its application to every
+# ordinary weekday is inferred from the instances' consistency — the same
+# honest downgrade the Sunday 16:00 pre-open carries.
+verification = "corroborated"
+evidence = ["cme-memorial-day-2023-schedule", "cme-thanksgiving-2023-schedule"]
+
+[[weekly.friday]]
+state = "trading"
+start_day_offset = -1
+start_time = 17:00:00
+end_day_offset = 0
+end_time = 15:15:00
+verification = "verified-primary"
+evidence = ["cme-micro-emini-faq-2023-12", "cme-micro-emini-faq-2021-01"]
+
+[[weekly.friday]]
+state = "halt"
+start_day_offset = 0
+start_time = 15:15:00
+end_day_offset = 0
+end_time = 15:30:00
+verification = "verified-primary"
+evidence = ["cme-micro-emini-faq-2023-12", "cme-micro-emini-faq-2021-01"]
+
+[[weekly.friday]]
+state = "trading"
+start_day_offset = 0
+start_time = 15:30:00
+end_day_offset = 0
+end_time = 16:00:00
+verification = "verified-primary"
+evidence = ["cme-micro-emini-faq-2023-12", "cme-micro-emini-faq-2021-01"]
+
+# ---------------------------------------------------------------------------
+# Dated exceptions. Every exception either removes a trading date entirely or
+# restates the complete window list for one trading date; nothing is merged
+# with the weekly template. All are backed by CME's own per-holiday Globex
+# schedules, which label each window with its TRADE DATE explicitly.
+# ---------------------------------------------------------------------------
+
+# Memorial Day 2023: Monday 29 May is not a trading date. Trade date Tuesday
+# 30 May opened Sunday evening, traded until Monday 12:00, halted until the
+# Monday 17:00 reopen, and closed normally on Tuesday.
+
+[[exception]]
+trading_date = 2023-05-29
+kind = "removed"
+verification = "verified-primary"
+evidence = ["cme-memorial-day-2023-schedule"]
+
+[[exception]]
+trading_date = 2023-05-30
+kind = "replaced"
+verification = "verified-primary"
+evidence = ["cme-memorial-day-2023-schedule", "cme-micro-emini-faq-2023-12"]
+
+[[exception.window]]
+state = "halt"
+start_date = 2023-05-28
+start_time = 16:00:00
+end_date = 2023-05-28
+end_time = 17:00:00
+
+[[exception.window]]
+state = "trading"
+start_date = 2023-05-28
+start_time = 17:00:00
+end_date = 2023-05-29
+end_time = 12:00:00
+
+[[exception.window]]
+state = "halt"
+start_date = 2023-05-29
+start_time = 12:00:00
+end_date = 2023-05-29
+end_time = 17:00:00
+
+[[exception.window]]
+state = "trading"
+start_date = 2023-05-29
+start_time = 17:00:00
+end_date = 2023-05-30
+end_time = 15:15:00
+
+[[exception.window]]
+state = "halt"
+start_date = 2023-05-30
+start_time = 15:15:00
+end_date = 2023-05-30
+end_time = 15:30:00
+
+[[exception.window]]
+state = "trading"
+start_date = 2023-05-30
+start_time = 15:30:00
+end_date = 2023-05-30
+end_time = 16:00:00
+
+# Juneteenth 2023: Monday 19 June is not a trading date; trade date Tuesday
+# 20 June follows the same holiday shape as Memorial Day.
+
+[[exception]]
+trading_date = 2023-06-19
+kind = "removed"
+verification = "verified-primary"
+evidence = ["cme-juneteenth-2023-schedule"]
+
+[[exception]]
+trading_date = 2023-06-20
+kind = "replaced"
+verification = "verified-primary"
+evidence = ["cme-juneteenth-2023-schedule", "cme-micro-emini-faq-2023-12"]
+
+[[exception.window]]
+state = "halt"
+start_date = 2023-06-18
+start_time = 16:00:00
+end_date = 2023-06-18
+end_time = 17:00:00
+
+[[exception.window]]
+state = "trading"
+start_date = 2023-06-18
+start_time = 17:00:00
+end_date = 2023-06-19
+end_time = 12:00:00
+
+[[exception.window]]
+state = "halt"
+start_date = 2023-06-19
+start_time = 12:00:00
+end_date = 2023-06-19
+end_time = 17:00:00
+
+[[exception.window]]
+state = "trading"
+start_date = 2023-06-19
+start_time = 17:00:00
+end_date = 2023-06-20
+end_time = 15:15:00
+
+[[exception.window]]
+state = "halt"
+start_date = 2023-06-20
+start_time = 15:15:00
+end_date = 2023-06-20
+end_time = 15:30:00
+
+[[exception.window]]
+state = "trading"
+start_date = 2023-06-20
+start_time = 15:30:00
+end_date = 2023-06-20
+end_time = 16:00:00
+
+# Independence Day 2023: Monday 3 July closed early at 12:15 with no
+# afternoon session; Tuesday 4 July is not a trading date; trade date
+# Wednesday 5 July opened Monday evening (pre-open 16:45), traded until the
+# Tuesday 12:00 halt, reopened Tuesday 17:00, and closed normally Wednesday.
+
+[[exception]]
+trading_date = 2023-07-03
+kind = "replaced"
+verification = "verified-primary"
+evidence = ["cme-independence-day-2023-schedule"]
+
+[[exception.window]]
+state = "halt"
+start_date = 2023-07-02
+start_time = 16:00:00
+end_date = 2023-07-02
+end_time = 17:00:00
+
+[[exception.window]]
+state = "trading"
+start_date = 2023-07-02
+start_time = 17:00:00
+end_date = 2023-07-03
+end_time = 12:15:00
+
+[[exception]]
+trading_date = 2023-07-04
+kind = "removed"
+verification = "verified-primary"
+evidence = ["cme-independence-day-2023-schedule"]
+
+[[exception]]
+trading_date = 2023-07-05
+kind = "replaced"
+verification = "verified-primary"
+evidence = ["cme-independence-day-2023-schedule", "cme-micro-emini-faq-2023-12"]
+
+[[exception.window]]
+state = "halt"
+start_date = 2023-07-03
+start_time = 16:45:00
+end_date = 2023-07-03
+end_time = 17:00:00
+
+[[exception.window]]
+state = "trading"
+start_date = 2023-07-03
+start_time = 17:00:00
+end_date = 2023-07-04
+end_time = 12:00:00
+
+[[exception.window]]
+state = "halt"
+start_date = 2023-07-04
+start_time = 12:00:00
+end_date = 2023-07-04
+end_time = 17:00:00
+
+[[exception.window]]
+state = "trading"
+start_date = 2023-07-04
+start_time = 17:00:00
+end_date = 2023-07-05
+end_time = 15:15:00
+
+[[exception.window]]
+state = "halt"
+start_date = 2023-07-05
+start_time = 15:15:00
+end_date = 2023-07-05
+end_time = 15:30:00
+
+[[exception.window]]
+state = "trading"
+start_date = 2023-07-05
+start_time = 15:30:00
+end_date = 2023-07-05
+end_time = 16:00:00
+
+# Labor Day 2023: Monday 4 September is not a trading date; trade date
+# Tuesday 5 September follows the Memorial Day shape.
+
+[[exception]]
+trading_date = 2023-09-04
+kind = "removed"
+verification = "verified-primary"
+evidence = ["cme-labor-day-2023-schedule"]
+
+[[exception]]
+trading_date = 2023-09-05
+kind = "replaced"
+verification = "verified-primary"
+evidence = ["cme-labor-day-2023-schedule", "cme-micro-emini-faq-2023-12"]
+
+[[exception.window]]
+state = "halt"
+start_date = 2023-09-03
+start_time = 16:00:00
+end_date = 2023-09-03
+end_time = 17:00:00
+
+[[exception.window]]
+state = "trading"
+start_date = 2023-09-03
+start_time = 17:00:00
+end_date = 2023-09-04
+end_time = 12:00:00
+
+[[exception.window]]
+state = "halt"
+start_date = 2023-09-04
+start_time = 12:00:00
+end_date = 2023-09-04
+end_time = 17:00:00
+
+[[exception.window]]
+state = "trading"
+start_date = 2023-09-04
+start_time = 17:00:00
+end_date = 2023-09-05
+end_time = 15:15:00
+
+[[exception.window]]
+state = "halt"
+start_date = 2023-09-05
+start_time = 15:15:00
+end_date = 2023-09-05
+end_time = 15:30:00
+
+[[exception.window]]
+state = "trading"
+start_date = 2023-09-05
+start_time = 15:30:00
+end_date = 2023-09-05
+end_time = 16:00:00
+
+# Thanksgiving 2023: Thursday 23 November is not a trading date. Trade date
+# Friday 24 November opened Wednesday evening (pre-open 16:45), traded until
+# the Thursday 12:00 halt, reopened Thursday 17:00, and closed early Friday
+# at 12:15 with no afternoon session.
+
+[[exception]]
+trading_date = 2023-11-23
+kind = "removed"
+verification = "verified-primary"
+evidence = ["cme-thanksgiving-2023-schedule"]
+
+[[exception]]
+trading_date = 2023-11-24
+kind = "replaced"
+verification = "verified-primary"
+evidence = ["cme-thanksgiving-2023-schedule"]
+
+[[exception.window]]
+state = "halt"
+start_date = 2023-11-22
+start_time = 16:45:00
+end_date = 2023-11-22
+end_time = 17:00:00
+
+[[exception.window]]
+state = "trading"
+start_date = 2023-11-22
+start_time = 17:00:00
+end_date = 2023-11-23
+end_time = 12:00:00
+
+[[exception.window]]
+state = "halt"
+start_date = 2023-11-23
+start_time = 12:00:00
+end_date = 2023-11-23
+end_time = 17:00:00
+
+[[exception.window]]
+state = "trading"
+start_date = 2023-11-23
+start_time = 17:00:00
+end_date = 2023-11-24
+end_time = 12:15:00
+
+# Christmas 2023: Monday 25 December is not a trading date and there was no
+# Sunday 24 December session at all. Trade date Tuesday 26 December opened
+# Monday evening (pre-open 16:00) and closed normally on Tuesday.
+
+[[exception]]
+trading_date = 2023-12-25
+kind = "removed"
+verification = "verified-primary"
+evidence = ["cme-christmas-2023-schedule"]
+
+[[exception]]
+trading_date = 2023-12-26
+kind = "replaced"
+verification = "verified-primary"
+evidence = ["cme-christmas-2023-schedule", "cme-micro-emini-faq-2023-12"]
+
+[[exception.window]]
+state = "halt"
+start_date = 2023-12-25
+start_time = 16:00:00
+end_date = 2023-12-25
+end_time = 17:00:00
+
+[[exception.window]]
+state = "trading"
+start_date = 2023-12-25
+start_time = 17:00:00
+end_date = 2023-12-26
+end_time = 15:15:00
+
+[[exception.window]]
+state = "halt"
+start_date = 2023-12-26
+start_time = 15:15:00
+end_date = 2023-12-26
+end_time = 15:30:00
+
+[[exception.window]]
+state = "trading"
+start_date = 2023-12-26
+start_time = 15:30:00
+end_date = 2023-12-26
+end_time = 16:00:00
+
+# ---------------------------------------------------------------------------
+# Evidence records. Concise claims only; the durable narrative register with
+# full retrieval context is docs/calendar-evidence.md. Sources are official
+# CME Group publications; the archive URLs are Internet Archive snapshots of
+# the official URLs, because cmegroup.com blocks automated retrieval from the
+# environment this definition was authored in.
+# ---------------------------------------------------------------------------
+
+[[evidence]]
+id = "cme-micro-emini-faq-2023-12"
+source_type = "cme-faq"
+title = "Micro E-mini Equity Index futures FAQ, Q8 trading hours"
+source_url = "https://www.cmegroup.com/articles/faqs/micro-e-mini-equity-index-futures-frequently-asked-questions.html"
+archive_url = "https://web.archive.org/web/20231204103453/https://www.cmegroup.com/articles/faqs/micro-e-mini-equity-index-futures-frequently-asked-questions.html"
+accessed = 2026-08-10
+claim = "Trading hours on CME Globex: Sunday-Friday 6:00 p.m.-5:00 p.m. ET with a trading halt from 4:15 p.m.-4:30 p.m. ET (17:00-16:00 CT, halt 15:15-15:30 CT); Micro E-minis share the E-mini equity index schedule."
+
+[[evidence]]
+id = "cme-micro-emini-faq-2021-01"
+source_type = "cme-faq"
+title = "Micro E-mini Equity Index futures FAQ (earlier URL), trading hours"
+source_url = "https://www.cmegroup.com/education/frequently-asked-questions-micro-e-mini-equity-index-futures.html"
+archive_url = "https://web.archive.org/web/20210121014923/https://www.cmegroup.com/education/frequently-asked-questions-micro-e-mini-equity-index-futures.html"
+accessed = 2026-08-10
+claim = "Identical trading-hours statement (Sunday-Friday 6:00 p.m.-5:00 p.m. ET, halt 4:15-4:30 p.m. ET) already published in January 2021, bracketing the supported range together with the 2023-12 snapshot."
+
+[[evidence]]
+id = "cme-memorial-day-2023-schedule"
+source_type = "cme-holiday-schedule-pdf"
+title = "CME Group Holiday Schedule: Memorial Day 2023 (Globex), EQUITIES rows"
+source_url = "https://www.cmegroup.com/trading-hours/files/memorial-day-2023.pdf"
+archive_url = "https://web.archive.org/web/20230420224018/https://www.cmegroup.com/trading-hours/files/memorial-day-2023.pdf"
+accessed = 2026-08-10
+claim = "Sun 28 May 16:00 PREOPEN / 17:00 OPEN and Mon 29 May 12:00 PREOPEN-HALT / 17:00 OPEN all carry TRADE DATE TUES 30 MAY; Tue 30 May 16:00 CLOSED; Wed 31 May trade date pre-opens 16:45. Times U.S. Central Time."
+
+[[evidence]]
+id = "cme-juneteenth-2023-schedule"
+source_type = "cme-holiday-schedule-pdf"
+title = "CME Group Holiday Schedule: Juneteenth 2023 (Globex), EQUITIES rows"
+source_url = "https://www.cmegroup.com/trading-hours/files/juneteenth-2023.pdf"
+archive_url = "https://web.archive.org/web/20230613185949/https://www.cmegroup.com/trading-hours/files/juneteenth-2023.pdf"
+accessed = 2026-08-10
+claim = "Sun 18 Jun 16:00 PREOPEN / 17:00 OPEN and Mon 19 Jun 12:00 PREOPEN-HALT / 17:00 OPEN all carry TRADE DATE TUES 20 JUNE; Tue 20 Jun 16:00 CLOSED; Wed 21 Jun trade date pre-opens 16:45."
+
+[[evidence]]
+id = "cme-independence-day-2023-schedule"
+source_type = "cme-holiday-schedule-pdf"
+title = "CME Group Holiday Schedule: 4th of July 2023 (Globex), EQUITIES rows"
+source_url = "https://www.cmegroup.com/trading-hours/files/4th-of-july-2023.pdf"
+archive_url = "https://web.archive.org/web/20230627125057/https://www.cmegroup.com/trading-hours/files/4th-of-july-2023.pdf"
+accessed = 2026-08-10
+claim = "Mon 3 Jul: TRADE DATE MON 3 JULY 12:15 CLOSED (early close); then TRADE DATE WED 5 JULY 16:45 PREOPEN / 17:00 OPEN; Tue 4 Jul 12:00 PREOPEN-HALT / 17:00 OPEN for trade date WED 5 JULY; Wed 5 Jul 16:00 CLOSED."
+
+[[evidence]]
+id = "cme-labor-day-2023-schedule"
+source_type = "cme-holiday-schedule-pdf"
+title = "CME Group Holiday Schedule: Labor Day 2023 (Globex), EQUITIES rows"
+source_url = "https://www.cmegroup.com/trading-hours/files/labor-day-2023.pdf"
+archive_url = "https://web.archive.org/web/20230802192446/https://www.cmegroup.com/trading-hours/files/labor-day-2023.pdf"
+accessed = 2026-08-10
+claim = "Sun 3 Sep 16:00 PREOPEN / 17:00 OPEN and Mon 4 Sep 12:00 PREOPEN-HALT / 17:00 OPEN all carry TRADE DATE TUES 5 SEP; Tue 5 Sep 16:00 CLOSED; Wed 6 Sep trade date pre-opens 16:45."
+
+[[evidence]]
+id = "cme-thanksgiving-2023-schedule"
+source_type = "cme-holiday-schedule-pdf"
+title = "CME Group Holiday Schedule: Thanksgiving 2023 (Globex), EQUITIES rows"
+source_url = "https://www.cmegroup.com/trading-hours/files/thanksgiving-day-2023.pdf"
+archive_url = "https://web.archive.org/web/20231203205929/https://www.cmegroup.com/trading-hours/files/thanksgiving-day-2023.pdf"
+accessed = 2026-08-10
+claim = "Wed 22 Nov 16:00 CLOSED ends trade date WED 22 NOV; Wed 16:45 PREOPEN / 17:00 OPEN and Thu 23 Nov 12:00 PREOPEN-HALT / 17:00 OPEN carry TRADE DATE FRI 24 NOV; Fri 24 Nov 12:15 CLOSED (early close)."
+
+[[evidence]]
+id = "cme-christmas-2023-schedule"
+source_type = "cme-holiday-schedule-pdf"
+title = "CME Group Holiday Schedule: Christmas 2023 (Globex), EQUITIES rows"
+source_url = "https://www.cmegroup.com/trading-hours/files/christmas-day-2023.pdf"
+archive_url = "https://web.archive.org/web/20260719095248/https://www.cmegroup.com/trading-hours/files/christmas-day-2023.pdf"
+accessed = 2026-08-10
+claim = "Mon 25 Dec 16:00 PREOPEN / 17:00 OPEN carries TRADE DATE TUES 26 DEC (no earlier session that weekend); Tue 26 Dec 16:00 CLOSED is the regular Globex close; day orders entered after Monday's pre-open are for trade date Tuesday 26 December."
+
+[[evidence]]
+id = "cme-holiday-calendar-2023-enumeration"
+source_type = "cme-holiday-calendar-page"
+title = "CME Group Holiday Calendar page, 2023 holiday enumeration"
+source_url = "https://www.cmegroup.com/tools-information/holiday-calendar.html"
+archive_url = "https://web.archive.org/web/20231203104831/https://www.cmegroup.com/tools-information/holiday-calendar.html"
+accessed = 2026-08-10
+claim = "The 2023 Globex trading-hours holiday views are exactly trade dates 01-16, 02-20, 04-07, 05-29, 06-19, 07-04, 09-04, 11-23, 12-25 (and 2024-01-01). Columbus Day and Veterans Day 2023 appear only as clearing/OTC advisories, not as Globex trading-schedule deviations, so the regular schedule applied on 2023-10-09 and 2023-11-10. Corroborated by the 2023-05-28 snapshot of the same page and by the Columbus Day clearing advisory (normal top-day clearing, normal settlement windows)."

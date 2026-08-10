@@ -156,6 +156,14 @@ year per dataset rather than inferring either. That is a future decision with
 its own migration plan. Until then, the legacy `instrument_symbol` string is a
 **vendor alias**, not canonical identity, and must not be read as one.
 
+**Version 2 note (ADR-010), no bump: exchange calendars do not touch storage.**
+Phase 2.1 added the exchange-calendar subsystem entirely outside the storage
+schema: no calendar column exists in any Parquet schema, no metadata field was
+added, and no stored file changed meaning. A calendar is pinned by three
+strings — `CalendarId`, `CalendarVersion`, and the materialized content hash —
+which a future run manifest or dataset-catalog artifact can record without any
+schema-v2 reinterpretation. Schema v3 fields are not designed here.
+
 **Version 2 clarification (ADR-004), no bump.** The canonical numeric envelope
 narrows what the *domain* accepts; it does not change what storage writes or how
 a written file is read. Column names, types, fixed-point encoding, and metadata
