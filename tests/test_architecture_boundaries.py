@@ -283,6 +283,103 @@ def test_data_import_does_not_import_application() -> None:
     assert _violations(source_prefix=DATA_IMPORT, forbidden_prefix=APPLICATION) == []
 
 
+# --------------------------------------------------------------------------
+# Exchange calendars (Phase 2.1, ADR-010)
+#
+# Calendar semantics live in the domain; calendar *data* (TOML definitions and
+# their loader) lives in the `calendars` package, which depends on the domain
+# and on nothing else in the project. The domain must never depend back on the
+# data package, or facts and semantics become circular.
+# --------------------------------------------------------------------------
+
+CALENDARS = f"{ROOT_MODULE}.calendars"
+
+CALENDAR_DOMAIN_MODULES = (
+    f"{DOMAIN}.exchange_calendar",
+    f"{DOMAIN}.calendar_definition",
+    f"{DOMAIN}.calendar_materialization",
+)
+
+
+def test_calendar_modules_exist_and_are_scanned() -> None:
+    for module in (*CALENDAR_DOMAIN_MODULES, CALENDARS):
+        assert _modules_under(module), f"{module} was not scanned"
+
+
+def test_domain_does_not_import_the_calendars_data_package() -> None:
+    assert _violations(source_prefix=DOMAIN, forbidden_prefix=CALENDARS) == []
+
+
+def test_calendars_package_depends_only_on_the_domain() -> None:
+    for module, imported in _modules_under(CALENDARS):
+        outward = {
+            name
+            for name in imported
+            if name.startswith(f"{ROOT_MODULE}.")
+            and not name.startswith(f"{DOMAIN}.")
+            and name != CALENDARS
+            and not name.startswith(f"{CALENDARS}.")
+        }
+        assert outward == set(), f"{module} depends outward on {sorted(outward)}"
+
+
+def _calendar_modules() -> list[tuple[str, set[str]]]:
+    """Every calendar module, discovered by sweep rather than enumeration.
+
+    A hard-coded module list covers exactly the files that exist on the day it
+    is written; a `calendars/registry.py` added later would escape it. The
+    sweep takes the whole `calendars` package plus every domain module whose
+    name mentions the calendar subject, so additions are covered by default.
+    """
+    found = _modules_under(CALENDARS)
+    for module, imported in _modules_under(DOMAIN):
+        if "calendar" in module.rsplit(".", 1)[-1]:
+            found.append((module, imported))
+    return found
+
+
+def test_the_calendar_sweep_finds_the_known_modules() -> None:
+    names = {module for module, _ in _calendar_modules()}
+    for module in (*CALENDAR_DOMAIN_MODULES, CALENDARS, f"{CALENDARS}.loader"):
+        assert module in names, f"{module} escaped the calendar sweep"
+
+
+def test_calendar_modules_do_not_import_ambient_state_machinery() -> None:
+    # The calendar legitimately imports datetime and zoneinfo — it is the one
+    # domain area whose subject *is* time — so the identity-module blanket ban
+    # does not apply. What stays banned is machinery for ambient, run-varying
+    # state: randomness, process identity, locale, and environment access.
+    forbidden = {"random", "uuid", "os", "locale", "time"}
+    for module, imported in _calendar_modules():
+        roots = {name.split(".")[0] for name in imported}
+        assert roots & forbidden == set(), f"{module} imports {sorted(roots & forbidden)}"
+
+
+def test_calendar_modules_never_read_the_wall_clock() -> None:
+    """`datetime.now`, `datetime.today`, `date.today`, and `datetime.utcnow`
+    must not appear in any calendar module: a calendar answer that depends on
+    when it was computed is irreproducible by construction. This is a source
+    scan rather than an import check because the `datetime` module itself is
+    legitimately imported."""
+    banned_calls = {"now", "today", "utcnow", "fromtimestamp"}
+    covered = {module for module, _ in _calendar_modules()}
+    for path in sorted(PACKAGE_ROOT.rglob("*.py")):
+        module = _module_name(path)
+        if module not in covered:
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr in banned_calls
+            ):
+                raise AssertionError(
+                    f"{module} calls .{node.func.attr}() at line {node.lineno}; "
+                    f"calendar code must never read the wall clock"
+                )
+
+
 def test_application_does_not_import_provider_implementations() -> None:
     # The application accepts any MarketDataProvider through the interface
     # module and must never bind to a vendor. Everything under ``providers``
