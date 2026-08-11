@@ -24,6 +24,9 @@ correct.
 | Futures contract identity in **storage** | **not implemented** — needs schema v3 |
 | Exchange-calendar engine (definitions → materialized UTC windows → resolver) | implemented |
 | CME equity-index (ES/NQ) calendar facts | **verified for trading dates 2023-05-22 … 2023-12-29 only** |
+| Futures rollover mapping (instant → listed contract) | implemented |
+| Continuous-series identity (non-executable) | implemented |
+| Continuous **price** series (back-adjustment) | **not implemented**, deliberately |
 
 ## Futures instrument identity
 
@@ -76,6 +79,45 @@ A trading date is assigned by the calendar, never derived from a timestamp:
 the Sunday-evening session before Memorial Day 2023 belongs to trading date
 **Tuesday** 2023-05-30, per CME's own schedule.
 
+## Futures rollover and continuous mapping
+
+A continuous series is a research construct; no order was ever filled in one.
+The rollover layer answers one question — *at this UTC instant, which listed
+contract was active?* — and nothing else. See
+`docs/adr/ADR-011-futures-rollover-and-continuous-mapping.md`.
+
+```
+ExplicitRollDefinition / FixedCalendarRollDefinition   authored facts
+      │  deterministic materialization
+      ▼
+RollSchedule           explicit UTC roll events, content-hashed
+      │
+      ▼
+RollResolver.active_contract_at(utc) -> FuturesContractId
+```
+
+- **A continuous identity can never be executed.** `ContinuousSeriesId`
+  (`CME:ES:CONTINUOUS:ACTIVE`) is not a `FuturesContractId` and fails
+  `require_listed_contract` automatically — the exact-type guard ADR-009 built
+  for precisely this. Its canonical form has four fields against a listed
+  contract's three, so neither parses as the other.
+- **Exactly one contract at every supported instant.** Roll boundaries are
+  half-open `[start, end)` at microsecond precision; outside the declared range
+  the schedule raises rather than extrapolating.
+- **A trading date is never collapsed.** A roll can land mid-session, so
+  `segments_for_trading_date` returns ordered segments carrying the exchange
+  state, not one arbitrarily chosen contract.
+- **Trading-date arithmetic is the calendar's, not Python's.** The
+  fixed-calendar rule counts back *trading dates*; weekends and holidays are
+  skipped because the calendar says they are not trading dates.
+- **No lifecycle fact is ever computed.** A contract's last trade date is
+  supplied with evidence; there is no expiry formula anywhere. A missing fact
+  is unsupported.
+- **No prices are synthesized.** No back-adjustment, ratio, Panama, or
+  roll-gap smoothing — and no placeholder API for them.
+
+**No roll data ships.** Every schedule and lifecycle fact is caller-supplied.
+
 ## What is not implemented
 
 Replay, execution, strategies, portfolio, options, Monte Carlo, prop-firm
@@ -84,9 +126,10 @@ or historical vendor APIs, credential handling, and experiment tracking.
 
 Also not implemented: research session segmentation (RTH/ETH labels over the
 calendar), instrument→calendar mapping, calendar facts outside the verified
-2023 range, rollover, continuous futures and back-adjustment, instrument
-specifications, any vendor symbol-to-identity alias registry, and persistence
-of canonical instrument identity.
+2023 range, continuous **price** construction and back-adjustment,
+volume/open-interest roll rules, instrument specifications, any vendor
+symbol-to-identity alias registry, and persistence of canonical instrument
+identity or of roll schedules.
 
 Storage writes and reads single-record-type Parquet files by path. There is no
 catalogue, no partitioning, and no performance claim.

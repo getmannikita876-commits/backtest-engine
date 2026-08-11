@@ -164,6 +164,17 @@ strings — `CalendarId`, `CalendarVersion`, and the materialized content hash �
 which a future run manifest or dataset-catalog artifact can record without any
 schema-v2 reinterpretation. Schema v3 fields are not designed here.
 
+**Version 2 note (ADR-011), no bump: rollover does not touch storage.**
+Phase 2.2 added futures rollover and continuous-series mapping entirely outside
+the storage schema: no roll, series, or lifecycle column exists in any Parquet
+schema, no metadata field was added, and no stored file changed meaning.
+`instrument_symbol` keeps its ADR-009 status as a legacy vendor alias — nothing
+reads it as canonical identity, and no continuous identity is written into it.
+A roll schedule is pinned by its content hash, which a future run manifest can
+record alongside the calendar's three-string pin without reinterpreting
+anything. Roll schedules have **no persisted artifact format** in this phase;
+persistence belongs to the dataset-catalog work.
+
 **Version 2 clarification (ADR-004), no bump.** The canonical numeric envelope
 narrows what the *domain* accepts; it does not change what storage writes or how
 a written file is read. Column names, types, fixed-point encoding, and metadata

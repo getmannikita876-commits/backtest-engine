@@ -49,6 +49,7 @@ from quant_research_terminal.domain.exchange_calendar import (
     RuleProvenance,
     TradingDate,
 )
+from quant_research_terminal.domain.time import epoch_microseconds
 
 _ONE_DAY: Final[timedelta] = timedelta(days=1)
 
@@ -178,8 +179,11 @@ def canonical_serialization(
     return json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("ascii")
 
 
-def _epoch_microseconds(instant: datetime) -> int:
-    return (instant - datetime(1970, 1, 1, tzinfo=UTC)) // timedelta(microseconds=1)
+#: Re-exported under the module-private name this file has always used, so the
+#: serialization below is unchanged while the arithmetic has exactly one home
+#: (:mod:`quant_research_terminal.domain.time`). The encoding is identical, so
+#: no published content hash moves — asserted by the pinned CME calendar hash.
+_epoch_microseconds = epoch_microseconds
 
 
 def materialize(definition: CalendarDefinition) -> MaterializedCalendar:

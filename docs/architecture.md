@@ -208,6 +208,45 @@ CalendarResolver              pure bisect lookups; UTC-only inputs;
   a divergent zoneinfo source fail loudly; the resolver itself never touches
   local time.
 
+## Futures rollover and continuous mapping
+
+The rollover subsystem (ADR-011) sits beside the calendar and consumes it:
+
+```
+Explicit / FixedCalendar RollDefinition    authored facts (+ calendar pin)
+      │  deterministic materialization
+      ▼
+RollSchedule                               explicit UTC events, content-hashed
+      │
+      ▼
+RollResolver                               pure bisect lookups
+```
+
+- **Mapping, not price synthesis.** The layer answers *instant → listed
+  contract*. Back-adjustment, ratio/Panama methods, and synthetic OHLC are not
+  implemented and have no placeholder API; they change what the numbers mean
+  and belong to a later research layer.
+- **Listed ≠ synthetic.** `ContinuousSeriesId` is its own type, canonically
+  `CME:ES:CONTINUOUS:ACTIVE` (four fields against a listed contract's three),
+  and fails `require_listed_contract` automatically.
+- **Total coverage is structural.** Exactly one contract is active at every
+  instant of the supported range, as a consequence of `bisect_right` over
+  strictly increasing effective times — the validators exist to prevent silent
+  *loss* (a duplicate instant erasing an event, a `from_contract` naming a
+  contract that was never active).
+- **Decision time is kept apart from effective time**, so a future data-driven
+  rule can prove it consumed no information published after its decision.
+- **The calendar travels with the schedule.** A schedule pins the calendar's
+  id, version, and content hash, and segmentation verifies them — roll instants
+  are only meaningful against the trade-date labelling that produced them.
+- **Trading dates are never collapsed**: `segments_for_trading_date` returns
+  ordered segments carrying exchange state, because a roll can land
+  mid-session.
+- **Structural versus factual guarantees are stated, not implied.**
+  `RollSchedule` is unconstructible if structurally invalid; consistency with a
+  calendar and with lifecycle facts is checked in the materializers, so a
+  directly constructed schedule carries the structural guarantees only.
+
 ## Research invariants
 
 Market timestamps, exchange calendars, dataset provenance, configuration
