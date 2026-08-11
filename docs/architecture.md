@@ -295,6 +295,49 @@ catalog/  manifest · provenance · migration · registration · rebuildable ind
   pinning one physical hash all resolve through any surviving copy. Lookup by
   semantic hash reads the published manifests, so it works with no index at all.
 
+## Correction lineage and cross-batch comparison
+
+Datasets are immutable; corrections are real. The reconciliation is that a
+correction is a **separate immutable claim beside the data**, never a change to
+it (ADR-013).
+
+```
+domain/dataset_lineage.py    pure: SupersedesRelation + its hash + provenance
+      ▲
+catalog/lineage.py           publication · rebuildable index · graph navigation
+catalog/comparison.py        explicit dataset-to-dataset comparison
+```
+
+- **A separate artifact, not a manifest field.** A lineage claim is usually made
+  *after* both manifests exist and a manifest is immutable, so there is no moment
+  at which such a field could be filled — and the manifest hash covers every
+  field, so adding one would change a dataset's identity because something was
+  later said *about* it.
+- **Exact semantics.** `successor` was explicitly declared by an operator to
+  correct every manifest in `predecessors`. Nothing more: not preferred, not
+  latest, not automatically selected, and the predecessors stay valid.
+- **Old pins never redirect.** After `B supersedes A`, `read_manifest(A)` is
+  exactly A with its three hashes unchanged; B appears only via
+  `successors_of(A)`. There is no `latest`, `current`, or `preferred` API, and an
+  architecture test fails the build if such a name appears.
+- **Edges run predecessor → successor.** Branching (`A → B`, `A → C`) and
+  multi-parent (`A, B → C`) are both first-class; cycles are refused by a
+  deterministic, iterative check over *all* published relations.
+- **Predecessors are a set**, sorted by digest before hashing, so caller order
+  cannot produce two identities for one claim.
+- **The lineage index is a cache that navigation does not read.** The relation
+  files *are* the graph — each named by its content hash, each naming its own
+  endpoints — so an index can only restate them, and the restatement is the half
+  that goes stale. Deleting it changes no answer; that is what makes "never
+  authority" a fact rather than an aspiration.
+- **Comparison is explicit and ephemeral.** It reports evidence — exact-row
+  multiplicities, reordering, bar-period agreement and conflict — and returns a
+  plain value object that is never published, hashed, or indexed. Nothing in
+  import consults it, so import has no ambient dependency on catalog contents.
+- **Only bars have a provable natural key** (contract + period, ADR-005). Trades
+  and quotes have no logical event identity (ADR-003), so no correction is ever
+  inferred for them and a shared timestamp is not treated as one.
+
 ## Research invariants
 
 Market timestamps, exchange calendars, dataset provenance, configuration
@@ -306,6 +349,10 @@ A future `RunManifest` can pin its inputs with each dataset's
 adds provenance), plus — separately, and only where relevant — a calendar content
 hash (ADR-010) and a roll-schedule content hash (ADR-011). All four are exposed
 today; none of that orchestration is implemented.
+
+Publishing lineage **after** a run does not alter that pin — the run consumed the
+bytes it consumed. A future tool may surface "this dataset has successors" beside
+a result as information, without changing any execution input.
 
 The UI must never become the source of research truth: experiments will
 eventually be represented by serializable configurations and immutable result

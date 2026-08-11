@@ -470,9 +470,66 @@ order it pins is the artifact's **stored** order, which is *not* the future
 replay total order — `source_index` is not persisted, so nothing in a stored
 artifact proves its order came from `event_ordering_key`.
 
+### Record identity, and what cross-batch comparison can prove
+
+Comparison across two persisted datasets is bounded by what the *stored records*
+identify. That boundary is not a style choice; it was established empirically.
+
+| Record | Logical event identity | Cross-batch comparison can determine |
+| --- | --- | --- |
+| Trade | **none** (ADR-003) | exact canonical rows, with multiplicity; sequence and multiset equality; temporal overlap |
+| Quote | **none** (ADR-003, ADR-005) | the same |
+| Bar | the **period** (ADR-005) | all of the above, **plus** per-period agreement, conflict, and left/right-only |
+
+**Trades and quotes carry no identity.** ADR-003 records that identifying a trade
+by `(timestamp, instrument_symbol, price, size, side)` *destroyed data*, because
+one-lot fills at the same price inside one microsecond are ordinary tick data —
+"attribute equality was standing in for an identity that does not exist." So a
+shared timestamp is **not** a logical event key, and no correction is ever
+inferred between two rows. `exact_row_overlap_count == 0` means *no identical
+rows were found*, and never that the underlying market events are disjoint.
+
+**Bars are keyed by their period.** ADR-005 defines that key as
+`(instrument_symbol, interval_start, interval)`. Cross-batch comparison
+substitutes the **canonical contract** for the vendor alias — schema v3 makes the
+contract a dataset-level fact, and ADR-012 makes `vendor_symbol` provenance that
+must never decide whether two rows describe the same thing. So the effective key
+is `FuturesContractId + interval_start + interval`, and the per-row part reduces
+to `(interval_start, interval)`.
+
+**Duplicate bar keys are refused, not resolved.** ADR-005's uniqueness guarantee
+is an *import-validation* property. Storage enforces nothing of the kind —
+duplicate rows survive a round trip by design, and version-3 writes do not pass
+through the import validator — so an artifact can hold two rows for one period.
+Comparison raises rather than choosing, because first-wins and last-wins are both
+guesses about which claim counts.
+
+Rows are compared by the **same canonical encoding the semantic hash uses**
+(`canonical_record_bytes`), so "same row" and "same dataset" cannot drift apart,
+and `vendor_symbol` is excluded by construction rather than by a filter. Parquet
+bytes and writer metadata are never compared. Multiplicity is preserved:
+`[X, X, Y]` and `[X, Y]` are not the same multiset.
+
+### Correction lineage
+
+A correction is a separate immutable artifact — `SupersedesRelation`, published
+under `<catalog_root>/lineage/<relation_hash>.json` — never a change to a
+manifest. `DatasetManifest` has no `parent`, `supersedes`, or `revision` field.
+See ADR-013.
+
+The relation hash covers a format token, the successor `ManifestHash`, the
+**sorted** predecessor `ManifestHash` tuple, and structured provenance. It
+excludes every path, the catalog root, the wall clock, randomness, and
+publication order, so caller argument order cannot give one claim two identities.
+
+Publication requires the same contract and the same record type on both sides,
+and a **different** `SemanticDatasetHash` — identical semantics is provider or
+encoding variation, not correction. Different semantics, conversely, proves
+nothing: no relation exists until one is explicitly published.
+
 ### Not implemented
 
-No DuckDB, no SQL or remote catalog, no partitioning strategy, no caching, no
+No DuckDB, no SQL or graph database, no partitioning strategy, no caching, no
 query layer, and no performance claim of any kind. Durability is **not** claimed:
 `os.replace` gives visibility atomicity only, no `fsync` is called on the file or
 its directory, and directory `fsync` has no Windows equivalent — so recovery is

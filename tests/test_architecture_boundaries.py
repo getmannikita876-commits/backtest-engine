@@ -19,6 +19,8 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
+import pytest
+
 import quant_research_terminal
 
 PACKAGE_ROOT = Path(quant_research_terminal.__file__).parent
@@ -432,8 +434,10 @@ CATALOG = f"{ROOT_MODULE}.catalog"
 
 CATALOG_MODULES = (
     CATALOG,
+    f"{CATALOG}.comparison",
     f"{CATALOG}.errors",
     f"{CATALOG}.index",
+    f"{CATALOG}.lineage",
     f"{CATALOG}.manifest",
     f"{CATALOG}.migration",
     f"{CATALOG}.provenance",
@@ -457,6 +461,216 @@ def test_storage_does_not_import_the_catalog() -> None:
 
 def test_data_import_does_not_import_the_catalog() -> None:
     assert _violations(source_prefix=DATA_IMPORT, forbidden_prefix=CATALOG) == []
+
+
+def test_the_application_layer_does_not_import_the_catalog() -> None:
+    """No ambient cross-batch state anywhere in the import path.
+
+    If ``ImportDatasetUseCase`` could consult the catalog, an import's outcome
+    would depend on which unrelated datasets happen to sit in the local catalog —
+    the same input and configuration would stop producing the same result. Phase
+    2.4's comparison is an explicit later call, never something that happens
+    during import.
+    """
+    assert _violations(source_prefix=APPLICATION, forbidden_prefix=CATALOG) == []
+
+
+# --------------------------------------------------------------------------
+# Dataset lineage (Phase 2.4, ADR-013)
+# --------------------------------------------------------------------------
+
+#: The complete public surface of the lineage and comparison modules.
+#:
+#: An **allowlist**, not a denylist of suspicious words. A denylist only catches
+#: the names its author thought of: `newest_successor`, `head_of`, `tip`, and
+#: `winning_revision` would all sail past a list of "latest"/"preferred"/"merge"
+#: substrings while doing precisely the forbidden thing. Pinning the exact
+#: surface instead means **any** new public function fails this test until
+#: somebody adds it here deliberately — which is the moment to ask whether it
+#: selects a winner, merges data, or redirects a pinned identity.
+#:
+#: A branching correction DAG has no natural "latest", and a linear chain must
+#: not be allowed to imply one. A future caller pins an exact ``ManifestHash`` or
+#: applies an explicit policy of its own; nothing here may choose for it.
+EXPECTED_LINEAGE_API: dict[str, frozenset[str]] = {
+    f"{DOMAIN}.dataset_lineage": frozenset(
+        {
+            "RelationProvenance",
+            "RelationProvenanceKind",
+            "SupersedesRelation",
+            "SupersedesRelationHash",
+            "build_supersedes_relation",
+            "canonical_supersedes_bytes",
+            "compute_supersedes_relation_hash",
+            "operator_declared",
+            "relation_to_json_bytes",
+            "require_relation_provenance_kind",
+            "supersedes_canonical_payload",
+        }
+    ),
+    f"{CATALOG}.lineage": frozenset(
+        {
+            "LineageGraph",
+            "LineageIndex",
+            "LineageIndexEntry",
+            "empty_lineage_index",
+            "find_cycle",
+            "lineage_directory",
+            "lineage_index_from_json_bytes",
+            "lineage_index_path",
+            "load_lineage_graph",
+            "load_lineage_index",
+            "publish_supersedes_relation",
+            "published_relations",
+            "read_relation",
+            "rebuild_lineage_index",
+            "relation_from_json_bytes",
+            "relation_path",
+            "unpublished_relation_partials",
+            "validate_supersedes_relation",
+            "verify_lineage_acyclic",
+            "verify_lineage_index",
+            "write_lineage_index",
+        }
+    ),
+    f"{CATALOG}.comparison": frozenset(
+        {
+            "BarKey",
+            "BarKeyComparison",
+            "DatasetComparison",
+            "bar_key",
+            "compare_datasets",
+        }
+    ),
+}
+
+#: Method names on the graph that would turn an audit tool into a policy.
+FORBIDDEN_GRAPH_CONCEPTS = (
+    "latest",
+    "current",
+    "preferred",
+    "active",
+    "newest",
+    "head",
+    "tip",
+    "winner",
+    "winning",
+    "best",
+    "choose",
+    "select",
+    "resolve",
+    "merge",
+    "reconcile",
+    "apply",
+    "revision",
+    "prefer",
+)
+
+
+def test_the_lineage_modules_are_actually_being_scanned() -> None:
+    names = {module for module, _ in _modules_under(ROOT_MODULE)}
+    for module in (f"{DOMAIN}.dataset_lineage", f"{CATALOG}.lineage", f"{CATALOG}.comparison"):
+        assert module in names, f"{module} escaped the scan"
+
+
+def test_the_lineage_domain_module_depends_on_nothing_above_the_domain() -> None:
+    _, imported = _modules_under(f"{DOMAIN}.dataset_lineage")[0]
+    outward = {
+        name
+        for name in imported
+        if name.startswith(f"{ROOT_MODULE}.") and not name.startswith(f"{DOMAIN}.")
+    }
+    assert outward == set(), f"dataset_lineage depends outward on {sorted(outward)}"
+
+
+def test_the_lineage_domain_module_is_covered_by_the_determinism_sweep() -> None:
+    """Canary: the relation hash must not acquire a clock or a random source."""
+    names = {module for module, _ in _calendar_modules()}
+    assert f"{DOMAIN}.dataset_lineage" in names
+
+
+def _public_api(module: str) -> frozenset[str]:
+    """Return the public top-level names a module defines.
+
+    Parsed from the source rather than imported, so a name is caught by its
+    definition rather than by whatever the module happens to re-export.
+    """
+    path = PACKAGE_ROOT / Path(*module.split(".")[1:]).with_suffix(".py")
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    return frozenset(
+        node.name
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef)
+        and not node.name.startswith("_")
+    )
+
+
+@pytest.mark.parametrize("module", sorted(EXPECTED_LINEAGE_API))
+def test_the_lineage_public_surface_is_exactly_what_was_reviewed(module: str) -> None:
+    """An allowlist, so a new public name must be added here deliberately.
+
+    A denylist of suspicious substrings only catches the names its author
+    imagined; ``newest_successor`` or ``head_of`` would pass one while selecting
+    a winner. Pinning the surface makes every addition a decision.
+    """
+    assert _public_api(module) == EXPECTED_LINEAGE_API[module]
+
+
+@pytest.mark.parametrize("module", sorted(EXPECTED_LINEAGE_API))
+def test_no_public_lineage_name_expresses_selection_or_reconciliation(module: str) -> None:
+    """Graph navigation is informational; it never picks a winner or merges.
+
+    Public names only. A private ``_resolve_artifact`` resolves a *path* and is
+    nobody's revision policy, and the exact public surface is pinned by the test
+    above in any case — so this checks the names a caller can actually reach,
+    where these words really would mean what they say.
+    """
+    offenders = [
+        name
+        for name in _public_api(module)
+        for concept in FORBIDDEN_GRAPH_CONCEPTS
+        if concept in name.lower()
+    ]
+    assert offenders == [], f"{module} exposes selection-flavoured names: {offenders}"
+
+
+def test_the_catalog_namespace_exposes_no_selection_or_merge_entry_point() -> None:
+    """The package surface a caller actually reaches for."""
+    from quant_research_terminal import catalog
+
+    offenders = [
+        name
+        for name in catalog.__all__
+        for concept in ("latest", "current", "preferred", "merge", "reconcile", "newest", "best")
+        if concept in name.lower()
+    ]
+    assert offenders == [], f"a selection or merge entry point appeared: {offenders}"
+
+
+def test_lineage_does_not_reach_for_replay_execution_or_strategy() -> None:
+    """None of these exist. The assertion is that none appears later either."""
+    for module in (f"{DOMAIN}.dataset_lineage", f"{CATALOG}.lineage", f"{CATALOG}.comparison"):
+        for absent in ("replay", "execution", "strategy", "portfolio", "backtest"):
+            assert (
+                _violations(source_prefix=module, forbidden_prefix=f"{ROOT_MODULE}.{absent}") == []
+            )
+        assert _violations(source_prefix=module, forbidden_prefix=UI) == []
+        assert _violations(source_prefix=module, forbidden_prefix=PROVIDERS) == []
+
+
+def test_the_schema_version_was_not_bumped_for_lineage() -> None:
+    """Trade and quote lack persisted event identity, and that is accepted.
+
+    Inventing a vendor sequence column to improve correction matching would put
+    one vendor's semantics into the canonical market-data schema.
+    """
+    from quant_research_terminal.data.contracts import (
+        SCHEMA_VERSION,
+        SUPPORTED_SCHEMA_VERSIONS,
+    )
+
+    assert SCHEMA_VERSION == 3
+    assert SUPPORTED_SCHEMA_VERSIONS == frozenset({2, 3})
 
 
 def test_the_catalog_does_not_import_ui_or_providers() -> None:

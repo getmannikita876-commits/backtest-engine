@@ -67,6 +67,7 @@ from typing import Final
 
 from quant_research_terminal.catalog.errors import (
     ArtifactOutsideStorageRootError,
+    CatalogError,
     ManifestConflictError,
     ManifestHashMismatchError,
     MissingArtifactError,
@@ -137,15 +138,27 @@ class VerificationOutcome(StrEnum):
     MISSING_MANIFEST = "missing-manifest"
 
 
-def publish_bytes_atomically(path: Path, payload: bytes) -> bool:
+def publish_bytes_atomically(
+    path: Path, payload: bytes, *, conflict_error: type[CatalogError] = ManifestConflictError
+) -> bool:
     """Publish immutable bytes, refusing to change anything already there.
 
     Returns ``True`` if this call created the file and ``False`` if identical
     content was already published — which makes republication idempotent
     without rewriting a file another process may have open.
 
+    Args:
+        path: Where the content is published. Named by content everywhere this
+            is used, so the filename is discovery convenience, not identity.
+        payload: The exact bytes to publish.
+        conflict_error: Which typed failure to raise when different content is
+            already present. Every immutable artifact in the catalog publishes
+            through this one function so the atomicity story cannot diverge
+            between artifact kinds; only the name of the failure differs.
+
     Raises:
-        ManifestConflictError: if different content already exists at ``path``.
+        CatalogError: of type ``conflict_error``, if different content already
+            exists at ``path``.
         FileExistsError: if another process is mid-publication for the same
             target. The temporary file is created with ``O_EXCL`` precisely so
             that this is loud rather than a silent interleave.
@@ -153,8 +166,8 @@ def publish_bytes_atomically(path: Path, payload: bytes) -> bool:
     if path.exists():
         if path.read_bytes() == payload:
             return False
-        raise ManifestConflictError(
-            f"{path} already holds different content; a published manifest is immutable "
+        raise conflict_error(
+            f"{path} already holds different content; a published artifact is immutable "
             f"and is never overwritten. Identical identity with differing bytes means the "
             f"serialization is not deterministic"
         )
@@ -321,17 +334,31 @@ def load_index(catalog_root: Path) -> CatalogIndex:
     return index_from_json_bytes(path.read_bytes())
 
 
-def write_index(catalog_root: Path, index: CatalogIndex) -> None:
-    """Replace the location index.
+def write_index_bytes(path: Path, payload: bytes) -> None:
+    """Replace a derived-state file with an atomic rename.
 
-    Unlike a manifest the index is mutable derived state, so it is written with
-    a plain atomic replace rather than the immutable publication protocol.
+    Unlike an immutable artifact, derived state is *meant* to be replaced, so
+    this overwrites deliberately rather than refusing like
+    :func:`publish_bytes_atomically`. The rename still means no reader observes
+    a half-written file. Shared by every catalog cache so there is one
+    replace-a-cache implementation rather than one per index.
+
+    The temporary file carries the writing process's id. A fixed temporary name
+    is fine for a single writer and actively harmful for two: on Windows the
+    second writer's ``os.replace`` fails with ``PermissionError`` while the first
+    still holds the handle, turning a cache refresh into an exception. Two
+    processes may now both refresh the cache and the later rename wins, which is
+    correct for derived state either of them could have written.
     """
-    catalog_root.mkdir(parents=True, exist_ok=True)
-    path = index_path(catalog_root)
-    partial = path.with_name(path.name + CATALOG_PARTIAL_SUFFIX)
-    partial.write_bytes(index.to_json_bytes())
+    path.parent.mkdir(parents=True, exist_ok=True)
+    partial = path.with_name(f"{path.name}.{os.getpid()}{CATALOG_PARTIAL_SUFFIX}")
+    partial.write_bytes(payload)
     os.replace(partial, path)
+
+
+def write_index(catalog_root: Path, index: CatalogIndex) -> None:
+    """Replace the location index."""
+    write_index_bytes(index_path(catalog_root), index.to_json_bytes())
 
 
 def published_manifests(catalog_root: Path) -> tuple[DatasetManifest, ...]:

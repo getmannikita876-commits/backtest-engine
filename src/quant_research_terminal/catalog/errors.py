@@ -1,8 +1,16 @@
-"""Typed failures for dataset registration, verification, and migration.
+"""Typed failures for dataset registration, verification, migration, lineage,
+and cross-batch comparison.
 
-Every class here has a concrete trigger and a regression test. None is a
+Every *concrete* class here has a real trigger and a regression test. None is a
 placeholder for a hypothetical future case: an error taxonomy invented ahead of
-its callers is a set of promises nothing keeps.
+its callers is a set of promises nothing keeps. :class:`CatalogError` and
+:class:`LineageError` are abstract bases and are never raised directly — they
+exist so a caller can name a whole family in one ``except``.
+
+All of them descend from :class:`CatalogError`, including the lineage family, so
+a caller can catch the whole catalog surface with one name while still being able
+to distinguish "this correction claim is invalid" from "this artifact is not what
+its manifest says".
 """
 
 from __future__ import annotations
@@ -91,4 +99,85 @@ class UnsupportedMigrationError(CatalogError):
     symbol into a canonical identity: inferring a venue, a decade, or a
     delivery year from an alias is exactly the inference this phase exists to
     make impossible.
+    """
+
+
+class LineageError(CatalogError):
+    """Base class for every dataset-lineage error.
+
+    A :class:`CatalogError` as well, so one ``except`` can cover the whole
+    catalog surface while lineage failures stay separately catchable.
+    """
+
+
+class InvalidSupersedesRelationError(LineageError):
+    """A supersedes claim violates an invariant that needs both manifests.
+
+    Structural problems — no predecessors, duplicates, self-reference, a wrong
+    hash — make the relation unconstructible in the domain model. This is the
+    rest: the two manifests describe different contracts, different record
+    types, or the very same dataset semantics, none of which a correction can
+    be.
+    """
+
+
+class LineageCycleError(LineageError):
+    """Publishing this relation would make the supersedes graph cyclic.
+
+    A correction graph is a history, and a history cannot lead back to itself:
+    a cycle would assert that some dataset transitively corrects one of its own
+    predecessors.
+    """
+
+
+class MissingRelationError(LineageError):
+    """No relation is published under the requested identity.
+
+    Distinct from :class:`RelationHashMismatchError`, and the distinction is the
+    difference between a normal negative lookup and lineage corruption. Merging
+    them would leave a caller unable to tell "no such claim was ever made" from
+    "the claim on disk is not what it says it is".
+    """
+
+
+class RelationHashMismatchError(LineageError):
+    """A relation's stored hash does not match its own canonical content."""
+
+
+class RelationConflictError(LineageError):
+    """A different relation is already published under the same identity.
+
+    Since the relation hash is a function of the relation's canonical bytes,
+    this means either a SHA-256 collision or — far more likely — a serializer
+    that is not deterministic.
+    """
+
+
+class LineageIndexError(LineageError):
+    """The lineage index is present but unreadable.
+
+    Distinct from an *absent* index, which is normal. The index is a discovery
+    cache that no navigation answer depends on, so this is recoverable by
+    rebuilding it — but it is reported rather than swallowed.
+    """
+
+
+class DatasetNotComparableError(CatalogError):
+    """Two datasets are not directly cross-batch comparable.
+
+    Raised when the datasets describe different listed contracts or different
+    record types. Calling such a pair "conflicting" would be a false statement
+    about unrelated data.
+    """
+
+
+class AmbiguousBarKeyError(CatalogError):
+    """A bar dataset holds more than one row for one bar key.
+
+    Key-based comparison is undefined over a multiset-keyed relation, and the
+    two available shortcuts — keeping the first row or the last — are both
+    guesses that would silently decide which claim about a period counts. The
+    storage layer preserves duplicate rows by design and version-3 writes do not
+    pass through the import validator that rejects them (ADR-005), so this is a
+    reachable state, not a theoretical one.
     """

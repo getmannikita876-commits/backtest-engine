@@ -549,6 +549,122 @@ registering process per catalog root is assumed; an empty artifact's identity is
 uncorroborated by rows, and what detects tampering there is the manifest, not
 the reader; and SHA-256 here is integrity, not authenticity.
 
+## Phase 2.4 — Dataset revision lineage and cross-batch consistency (complete)
+
+Answers *"manifest B is said to correct manifest A — can that be represented
+without mutating A, without redirecting anyone who pinned A, and without
+pretending to know correction semantics the stored records cannot prove?"*
+See ADR-013.
+
+- **A correction is a separate immutable artifact.** `SupersedesRelation` is
+  published under `<catalog_root>/lineage/<relation_hash>.json`.
+  `DatasetManifest` gains **no** `parent`, `supersedes`, or `revision` field: a
+  claim is normally made *after* both manifests exist and a manifest is
+  immutable, and the manifest hash covers every field — so such a field would
+  change a dataset's identity because something was later said *about* it.
+- **Old pins never redirect.** After `B supersedes A`, `read_manifest(A)` returns
+  exactly A with all three hashes unchanged and verification still OK. B appears
+  only via `successors_of(A)`.
+- **No latest, current, or preferred**, and no revision number or
+  `DatasetFamilyId`. A branching DAG has no natural answer and a linear chain
+  must not imply one. A build-failing architecture test enforces the absence.
+- **Deterministic relation hash** over a format token, the successor, the
+  **sorted** predecessor set, and structured provenance — excluding path, catalog
+  root, clock, randomness, and publication order. Caller argument order cannot
+  give one claim two identities; a cross-process test pins this.
+- **Same semantic hash cannot be a correction** (that is provider or encoding
+  variation), and different semantic hashes prove **nothing** — no relation
+  exists until one is explicitly published. Same contract and same record type
+  are required.
+- **Branching, multi-parent, no cycles.** `A → B` and `A → C` are both valid;
+  `A, B → C` is valid; cycles are refused by a deterministic iterative check over
+  *all* published relations, including one that closes through any single
+  predecessor of a multi-parent claim.
+- **The lineage index is a cache navigation does not read.** The relation files
+  *are* the graph, so an index can only restate them — and the restatement is the
+  half that goes stale inside the publish-then-index crash window. Deleting it
+  changes no answer; `verify_lineage_index` reports staleness.
+- **Comparison is explicit and ephemeral**, never consulted during import, and
+  never publishes, merges, deduplicates, or creates lineage.
+- **Only bars have a provable key** — contract + period (ADR-005) — so a
+  per-period disagreement is a proven conflict with **no direction implied**, and
+  duplicate periods are refused rather than resolved by a first-wins guess.
+  Trades and quotes have no logical event identity (ADR-003), so a shared
+  timestamp is never treated as one.
+- **No schema v4.** Inventing a vendor sequence column to improve correction
+  matching would put one vendor's semantics into the canonical market-data
+  schema; ADR-003 records that what the vendors publish is an assumption.
+
+Not implemented, deliberately: automatic revision selection, automatic
+correction direction, automatic merge or reconciliation, cross-provider
+preference, `DERIVED_FROM` (Phase 2.3's `TransformationProvenance` already covers
+migration lineage), source-declared relation provenance, event/sequence ids,
+replay, execution, strategies, and UI.
+
+**Falsification record.** Pass 1 attacked all 32 brief-specified defects —
+automatic correction from differing semantics, same-semantic supersedes,
+insertion order as revision order, mtime, successor redirection, wrongly rejected
+branches, every cycle shape, manifest mutation, path/UUID/clock in the hash,
+trade and quote timestamp inference, missed bar conflicts, lost multiplicity,
+compression affecting semantics, ambient import coupling, provider preference,
+corrupt-artifact comparison, index loss, the publication crash window, duplicate
+publication, predecessor ordering, self-supersedes, publication time as
+availability, schema v4, merge code, replay leakage, and duplicate bar keys —
+**all held**.
+
+Four initially reported as broken were **probe defects, not code defects**: the
+greps matched the modules' own docstrings *documenting the absence* of the thing
+being probed. Rewritten to parse the AST, after which all 32 held with nothing
+changed in the source. Recorded because a detector that cannot tell code from a
+comment denying that code will eventually hide a real defect.
+
+Pass 2 (independent hostile review of the whole diff) was again the productive
+one: three defects, six weaknesses, five nits. The load-bearing ones: concurrent
+publication could leave a **cycle on disk** while the losing publisher got an
+untyped `PermissionError` *after* its relation was committed — so it was told the
+operation failed when the claim existed; `verify_lineage_index` **raised instead
+of returning a bool** on a corrupt cache, the exact trap `verify_registration`
+documents one module over; and `compare_datasets` tried only the **first** indexed
+location while `verify_manifest` tries all of them, so one stale entry in the part
+of the catalog explicitly allowed to be wrong turned an answerable comparison
+into a hard failure. The semantic-hash shortcut also made `bars` mean two
+different things and skipped the duplicate-key refusal, so that guarantee held
+only for some comparison partners.
+
+The residual publication race is **not** fixable without a lock, so it is now
+stated on the same terms as ADR-012's index assumption — and
+`verify_lineage_acyclic` was added so the single-writer assumption is *auditable*
+rather than merely asserted. The no-selection and no-merge guards, shown to miss
+`newest_successor` and `head_of`, were replaced by an **allowlist** pinning the
+exact public surface, so any new public name fails the build until it is added
+deliberately.
+
+One finding was accepted as correct and documented rather than changed: a chain
+`A → B → C` where C restores A's data is publishable, because the same-semantic
+refusal is deliberately pairwise — it blocks a claim that corrects *nothing*, not
+a chain that returns to an earlier state. Reverts are real.
+
+Known limitations, stated rather than hidden: **trade and quote corrections
+cannot be detected at all**, only exact-row differences reported — a real
+capability gap, accepted rather than faked; bar comparison **refuses** duplicate
+keys instead of analysing them; comparison reads and re-hashes each artifact
+twice (verify, then compare) and is in-memory and unprofiled, so it is not yet
+suited to artifacts that exceed memory; a **single publishing process per catalog
+root is assumed**, because concurrent publishers can each observe an acyclic
+graph and both commit — auditable with `verify_lineage_acyclic`; the lineage
+index write is not atomic with publication, so a stale index is reachable
+(harmless by design and detectable); durability is not claimed, on ADR-012's
+terms.
+
+**Above all: Phase 2.4 does not establish historical knowledge state.** Lineage
+records corrections known to the platform *now*. No manifest carries a
+trustworthy source-publication time, and catalog write time, filesystem mtime,
+the clock, and registration order all measure when this machine learned
+something — not when the market data was revised. So *"would this corrected
+dataset have been available to a strategy on date T?"* is unanswerable here, and
+is deliberately not approximated: a fake as-of capability would inject exactly
+the look-ahead bias ADR-002 exists to prevent.
+
 ## Later phases (gated)
 
 Deterministic replay, strategy APIs, execution simulation, experiments, and

@@ -98,7 +98,12 @@ _HASH_PATTERN: Final[re.Pattern[str]] = re.compile(r"[0-9a-f]{64}")
 _INT_WIDTH: Final[int] = 8
 
 #: The unit bar intervals are encoded in, matching the storage contract.
-_MICROSECOND_UNIT: Final[timedelta] = timedelta(microseconds=1)
+#:
+#: Public so that anything else deriving a bar's period uses this exact unit
+#: rather than a second copy of it; two spellings of one unit in two modules is
+#: the drift this module's canonical encoding exists to prevent.
+MICROSECOND_UNIT: Final[timedelta] = timedelta(microseconds=1)
+_MICROSECOND_UNIT: Final[timedelta] = MICROSECOND_UNIT
 
 
 @unique
@@ -367,6 +372,34 @@ def schema_token(record_type: RecordType) -> str:
     """
     fields = SEMANTIC_FIELD_ORDER[record_type]
     return f"{record_type.value}/{':'.join(fields)}"
+
+
+def canonical_record_bytes(record_type: RecordType, record: Trade | Quote | Bar) -> bytes:
+    """Return one record's canonical semantic encoding.
+
+    The **same** bytes the dataset hash is built from, exposed so that anything
+    asking "are these two rows the same row?" answers it with the definition the
+    dataset identity already uses. A second, separately written row-equality rule
+    would be a second definition of sameness, and the two would drift.
+
+    Vendor-neutral by construction rather than by a filter someone must remember
+    to apply: ``instrument_symbol`` is not among the encoded fields, so a vendor
+    alias cannot reach the result. The contract is *not* encoded either — it is a
+    dataset-level fact in schema v3, carried by the manifest, so callers
+    comparing rows across datasets must establish it separately.
+
+    Raises:
+        TypeError: if ``record_type`` is not exactly a :class:`RecordType`.
+        SemanticEncodingError: if ``record`` is not that type's record, or holds
+            a value outside the canonical encoding's range.
+    """
+    require_record_type(record_type)
+    expected = _EXPECTED_TYPES[record_type]
+    if type(record) is not expected:
+        raise SemanticEncodingError(
+            f"a {record_type.value} record is required; got {type(record).__name__}"
+        )
+    return _ENCODERS[record_type](record)
 
 
 @final
