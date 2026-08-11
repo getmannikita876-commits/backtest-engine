@@ -323,17 +323,38 @@ def test_calendars_package_depends_only_on_the_domain() -> None:
         assert outward == set(), f"{module} depends outward on {sorted(outward)}"
 
 
+#: Phase 2.2 rollover modules (ADR-011). Listed for the canary below; the
+#: sweep itself is token-based so a module added later is covered by default.
+ROLLOVER_DOMAIN_MODULES = (
+    f"{DOMAIN}.rollover",
+    f"{DOMAIN}.rollover_definition",
+    f"{DOMAIN}.rollover_materialization",
+    f"{DOMAIN}.contract_lifecycle",
+    f"{DOMAIN}.continuous_series",
+)
+
+#: Name tokens marking a module whose subject is time or instrument lifetime.
+#: Every such module is held to the no-ambient-state and no-wall-clock rules.
+#: ``time`` is in the list because ``domain/time.py`` owns the canonical UTC
+#: validation *and* ``epoch_microseconds``, the instant encoding both content
+#: hashes are built from. It is the single most wall-clock-sensitive module in
+#: the package, and it matched none of the subject tokens.
+_TIME_SENSITIVE_NAME_TOKENS = ("calendar", "rollover", "lifecycle", "continuous", "time")
+
+
 def _calendar_modules() -> list[tuple[str, set[str]]]:
-    """Every calendar module, discovered by sweep rather than enumeration.
+    """Every time-sensitive module, discovered by sweep rather than enumeration.
 
     A hard-coded module list covers exactly the files that exist on the day it
-    is written; a `calendars/registry.py` added later would escape it. The
-    sweep takes the whole `calendars` package plus every domain module whose
-    name mentions the calendar subject, so additions are covered by default.
+    is written; a `calendars/registry.py` or a new `domain/roll_*.py` added
+    later would escape it. The sweep takes the whole `calendars` package plus
+    every domain module whose name mentions one of the time-sensitive subjects,
+    so additions are covered by default.
     """
     found = _modules_under(CALENDARS)
     for module, imported in _modules_under(DOMAIN):
-        if "calendar" in module.rsplit(".", 1)[-1]:
+        basename = module.rsplit(".", 1)[-1]
+        if any(token in basename for token in _TIME_SENSITIVE_NAME_TOKENS):
             found.append((module, imported))
     return found
 
@@ -342,6 +363,48 @@ def test_the_calendar_sweep_finds_the_known_modules() -> None:
     names = {module for module, _ in _calendar_modules()}
     for module in (*CALENDAR_DOMAIN_MODULES, CALENDARS, f"{CALENDARS}.loader"):
         assert module in names, f"{module} escaped the calendar sweep"
+
+
+def test_the_sweep_covers_the_shared_time_module() -> None:
+    """``domain/time.py`` owns the instant encoding both content hashes use.
+
+    It matched none of the subject tokens, so the module most in need of the
+    no-wall-clock guarantee was the one module not covered by it.
+    """
+    names = {module for module, _ in _calendar_modules()}
+    assert f"{DOMAIN}.time" in names
+
+
+def test_the_sweep_also_finds_the_rollover_modules() -> None:
+    """Regression for the sweep's own blind spot.
+
+    None of the Phase 2.2 module names contain "calendar", so the Phase 2.1
+    sweep would have covered none of them — the ambient-state ban and the
+    wall-clock scan would have silently stopped applying to new code. That is
+    ADR-010's defect D9 re-opening, and this canary is what keeps it shut.
+    """
+    names = {module for module, _ in _calendar_modules()}
+    for module in ROLLOVER_DOMAIN_MODULES:
+        assert module in names, f"{module} escaped the time-sensitive module sweep"
+
+
+def test_rollover_modules_depend_on_nothing_above_the_domain() -> None:
+    for module in ROLLOVER_DOMAIN_MODULES:
+        _, imported = _modules_under(module)[0]
+        outward = {
+            name
+            for name in imported
+            if name.startswith(f"{ROOT_MODULE}.") and not name.startswith(f"{DOMAIN}.")
+        }
+        assert outward == set(), f"{module} depends outward on {sorted(outward)}"
+
+
+def test_rollover_modules_do_not_import_the_calendars_data_package() -> None:
+    # Rollover consumes the calendar *domain* types; the TOML definitions and
+    # their loader are data the caller supplies, not something rollover reaches
+    # for. Importing them would make a domain rule depend on shipped facts.
+    for module in ROLLOVER_DOMAIN_MODULES:
+        assert _violations(source_prefix=module, forbidden_prefix=CALENDARS) == []
 
 
 def test_calendar_modules_do_not_import_ambient_state_machinery() -> None:

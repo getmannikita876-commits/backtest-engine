@@ -390,6 +390,70 @@ continuous futures, instrument→calendar mapping, schema changes (storage
 stays at v2), replay, execution, and calendar facts outside the verified
 range.
 
+## Phase 2.2 — Futures rollover and continuous mapping (complete)
+
+Answers *at this UTC instant, which listed contract was active?* — and nothing
+else. See ADR-011.
+
+- **Ontology.** `ContinuousSeriesId` (`CME:ES:CONTINUOUS:ACTIVE`) is its own
+  type, never a `FuturesContractId`, and fails `require_listed_contract`
+  automatically. Four canonical fields against a listed contract's three, so
+  neither parses as the other — including when a product root is literally
+  spelled `CONTINUOUS`.
+- **Two ex-ante mechanisms.** `ExplicitRollDefinition` (operator-stated) and
+  `FixedCalendarRollDefinition` (roll N *trading dates* before a supplied last
+  trade date, at an explicitly named boundary with **no default**).
+- **`RollSchedule`** carries the product, a **calendar pin** (id, version,
+  content hash), the supported instant and trading-date ranges, the initial
+  contract, ordered events, provenance, and a content hash covering all of it.
+  Exactly one contract at every supported instant; chain continuity, strict
+  ordering, event observability, and contract distinctness are enforced at
+  construction.
+- **Half-open roll boundaries** at microsecond precision;
+  `segments_for_trading_date` returns ordered segments carrying exchange state
+  so an intraday roll is never collapsed.
+- **Calendar-decided trading-date arithmetic**: the count-back walks a civil-day
+  cursor while `windows_for` decides what a trading date is, so weekends and
+  holidays are skipped by fact rather than by weekday rule.
+- **`ContractLifecycle`** holds one supplied fact — `last_trade_date` — with its
+  own minimal provenance. No expiry formula exists anywhere.
+- **`RollDerivationKind`** (`OPERATOR_DECLARED` / `CALENDAR_DERIVED`) is a
+  mechanism, kept separate from the calendar's evidence-strength
+  `VerificationStatus`; Phase 2.1 is untouched.
+
+Not implemented, deliberately: continuous **price** construction and
+back-adjustment (no placeholder API), volume/open-interest roll rules,
+`RollObservation`, tie and oscillation policies, an instrument→calendar
+registry, persisted roll artifacts, schema v3, dataset catalog, replay, and
+execution. `SCHEMA_VERSION` remains 2.
+
+**Falsification record.** Pass 1 attacked all ten brief-specified defects
+(broken chain links, duplicate roll instants, coverage gaps, hash omissions,
+collapsed trading dates, date arithmetic replacing calendar semantics, inferred
+expiry, an executable continuous identity, `instrument_symbol` reinterpretation)
+— all held; it found one *test* gap, the documented "roll inside a closed gap"
+case, now a named regression.
+
+Pass 2 (independent hostile review of the whole diff) was the productive one:
+ten accepted findings, all fixed with regression tests. The load-bearing ones:
+provenance *order* was observable but could not reach the hash, so two
+observably different schedules shared a pin; `RollSchedule.events` admitted a
+subclass carrying public state the hash could not see; only one of the three
+pinned calendar fields was actually verified though ADR-011 claimed all three;
+`roll_effective_instant` had no final `else: raise`, so an equal-valued
+`StrEnum` string silently selected the *other* boundary policy; and
+`domain/time.py` — the new home of the instant encoding both content hashes
+use — escaped the architecture sweep's no-wall-clock guarantee entirely. Two
+findings were docstring corrections where the code was right but its stated
+reasoning was too strong.
+
+Known limitations, stated rather than hidden: a schedule can map a contract
+after its last trade date, because `last_trade_date` is a date and deriving a
+final tradable *instant* from calendar windows was explicitly rejected as
+unwarranted; LTD-anchored rolls cannot express first-notice-date anchoring; and
+no roll data ships, so any schedule built on the shipped calendar inherits its
+2023-05-22 … 2023-12-29 range.
+
 ## Later phases (gated)
 
 Deterministic replay, strategy APIs, execution simulation, experiments, and
