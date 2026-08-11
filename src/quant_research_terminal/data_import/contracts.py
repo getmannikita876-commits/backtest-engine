@@ -17,7 +17,7 @@ from typing import Any, Final, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from quant_research_terminal.data.contracts import SCHEMA_VERSION
+from quant_research_terminal.data.contracts import LEGACY_SCHEMA_VERSION
 from quant_research_terminal.domain.models import Bar, Quote, Trade
 
 
@@ -165,7 +165,13 @@ class ImportBatch(BaseModel):
 
     record_type: ImportRecordType
     rows: tuple[Mapping[str, Any], ...] = Field(default_factory=tuple)
-    schema_version: int = SCHEMA_VERSION
+    # Pinned to the legacy version, not to the platform's current one. This
+    # batch describes rows destined for the version-2 writers the import
+    # pipeline uses, and version 3 requires a canonical contract the pipeline
+    # has no way to supply. Reading the current constant here would have made
+    # every batch declare 3 the moment storage bumped, and any caller still
+    # passing 2 would have become batch-fatal.
+    schema_version: int = LEGACY_SCHEMA_VERSION
     strict_fields: bool = True
     duplicate_policy: DuplicatePolicy = DuplicatePolicy.REJECT
     source_name: str | None = None

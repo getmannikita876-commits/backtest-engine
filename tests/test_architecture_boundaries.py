@@ -339,7 +339,18 @@ ROLLOVER_DOMAIN_MODULES = (
 #: validation *and* ``epoch_microseconds``, the instant encoding both content
 #: hashes are built from. It is the single most wall-clock-sensitive module in
 #: the package, and it matched none of the subject tokens.
-_TIME_SENSITIVE_NAME_TOKENS = ("calendar", "rollover", "lifecycle", "continuous", "time")
+_TIME_SENSITIVE_NAME_TOKENS = (
+    "calendar",
+    "rollover",
+    "lifecycle",
+    "continuous",
+    "time",
+    # ``domain/dataset_identity.py`` owns the canonical semantic encoding: the
+    # one module whose entire purpose is producing the same bytes on every
+    # machine, forever. It matched none of the subject tokens above, so without
+    # this it would have been covered by no determinism guard at all.
+    "dataset",
+)
 
 
 def _calendar_modules() -> list[tuple[str, set[str]]]:
@@ -397,6 +408,147 @@ def test_rollover_modules_depend_on_nothing_above_the_domain() -> None:
             if name.startswith(f"{ROOT_MODULE}.") and not name.startswith(f"{DOMAIN}.")
         }
         assert outward == set(), f"{module} depends outward on {sorted(outward)}"
+
+
+def test_the_sweep_covers_the_dataset_identity_module() -> None:
+    """Canary for the module the phase's determinism claims rest on."""
+    names = {module for module, _ in _calendar_modules()}
+    assert f"{DOMAIN}.dataset_identity" in names
+
+
+# --------------------------------------------------------------------------
+# Dataset catalog (Phase 2.3, ADR-012)
+#
+# The catalog composes the domain's identity types with the storage layer's
+# files. It sits above both and is imported by neither.
+#
+# Its rule set is deliberately *not* the time-sensitive one: publishing a
+# manifest requires ``os.replace``, which that sweep bans. Randomness, UUIDs,
+# and wall-clock reads stay forbidden, because those are what would make an
+# immutable identity stop being reproducible.
+# --------------------------------------------------------------------------
+
+CATALOG = f"{ROOT_MODULE}.catalog"
+
+CATALOG_MODULES = (
+    CATALOG,
+    f"{CATALOG}.errors",
+    f"{CATALOG}.index",
+    f"{CATALOG}.manifest",
+    f"{CATALOG}.migration",
+    f"{CATALOG}.provenance",
+    f"{CATALOG}.store",
+)
+
+
+def test_the_catalog_package_is_actually_being_scanned() -> None:
+    names = {module for module, _ in _modules_under(CATALOG)}
+    for module in CATALOG_MODULES:
+        assert module in names, f"{module} escaped the catalog scan"
+
+
+def test_domain_does_not_import_the_catalog() -> None:
+    assert _violations(source_prefix=DOMAIN, forbidden_prefix=CATALOG) == []
+
+
+def test_storage_does_not_import_the_catalog() -> None:
+    assert _violations(source_prefix=STORAGE, forbidden_prefix=CATALOG) == []
+
+
+def test_data_import_does_not_import_the_catalog() -> None:
+    assert _violations(source_prefix=DATA_IMPORT, forbidden_prefix=CATALOG) == []
+
+
+def test_the_catalog_does_not_import_ui_or_providers() -> None:
+    assert _violations(source_prefix=CATALOG, forbidden_prefix=UI) == []
+    assert _violations(source_prefix=CATALOG, forbidden_prefix=PROVIDERS) == []
+
+
+def test_the_catalog_does_not_import_replay_execution_or_strategy() -> None:
+    """None of these exist. The assertion is that none appears later either."""
+    for absent in ("replay", "execution", "strategy", "portfolio", "backtest"):
+        assert _violations(source_prefix=CATALOG, forbidden_prefix=f"{ROOT_MODULE}.{absent}") == []
+
+
+def test_the_catalog_introduces_no_randomness_or_wall_clock() -> None:
+    """An identity that varies per run is not an identity."""
+    forbidden = {"random", "uuid", "secrets"}
+    for module, imported in _modules_under(CATALOG):
+        roots = {name.split(".")[0] for name in imported}
+        assert roots & forbidden == set(), f"{module} imports {sorted(roots & forbidden)}"
+
+
+def test_the_catalog_never_reads_the_wall_clock() -> None:
+    banned_calls = {"now", "today", "utcnow", "fromtimestamp", "monotonic"}
+    covered = {module for module, _ in _modules_under(CATALOG)}
+    for path in sorted(PACKAGE_ROOT.rglob("*.py")):
+        module = _module_name(path)
+        if module not in covered:
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr in banned_calls
+            ):
+                raise AssertionError(
+                    f"{module} calls .{node.func.attr}() at line {node.lineno}; a dataset "
+                    f"identity must not depend on when it was computed"
+                )
+
+
+#: Identity-critical modules that neither sweep reaches.
+#:
+#: ``data/artifact_hash.py`` computes the *physical* identity and lives under
+#: ``data``, which the time-sensitive sweep does not walk; ``domain/common.py``
+#: is now home to the re-validating ``model_copy`` that every frozen identity
+#: model inherits. Both matched no subject token, so the modules holding half
+#: the phase's guarantees were covered by no determinism guard at all — the same
+#: blind spot ADR-010's D9 opened, in a different package.
+IDENTITY_CRITICAL_MODULES = (
+    f"{STORAGE}.artifact_hash",
+    f"{DOMAIN}.common",
+)
+
+
+def test_identity_critical_modules_are_actually_present() -> None:
+    """A canary: a renamed module must fail loudly, not stop being checked."""
+    names = {module for module, _ in _modules_under(ROOT_MODULE)}
+    for module in IDENTITY_CRITICAL_MODULES:
+        assert module in names, f"{module} is missing; the guard below now checks nothing"
+
+
+def test_identity_critical_modules_introduce_no_randomness_or_ambient_state() -> None:
+    forbidden = {"random", "uuid", "secrets", "locale", "time"}
+    for module in IDENTITY_CRITICAL_MODULES:
+        _, imported = _modules_under(module)[0]
+        roots = {name.split(".")[0] for name in imported}
+        assert roots & forbidden == set(), f"{module} imports {sorted(roots & forbidden)}"
+
+
+def test_identity_critical_modules_never_read_the_wall_clock() -> None:
+    banned_calls = {"now", "today", "utcnow", "fromtimestamp", "monotonic"}
+    for path in sorted(PACKAGE_ROOT.rglob("*.py")):
+        if _module_name(path) not in IDENTITY_CRITICAL_MODULES:
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr in banned_calls
+            ):
+                raise AssertionError(
+                    f"{_module_name(path)} calls .{node.func.attr}() at line {node.lineno}; "
+                    f"an artifact's identity must not depend on when it was computed"
+                )
+
+
+def test_the_manifest_module_holds_no_filesystem_path_type() -> None:
+    """Structural check that location cannot leak into immutable identity."""
+    _, imported = _modules_under(f"{CATALOG}.manifest")[0]
+    assert "pathlib" not in {name.split(".")[0] for name in imported}
 
 
 def test_rollover_modules_do_not_import_the_calendars_data_package() -> None:

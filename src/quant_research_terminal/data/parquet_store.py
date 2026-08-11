@@ -83,24 +83,37 @@ import os
 from collections.abc import Iterable, Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Final
+from typing import Any, Final, NamedTuple, final
 
 import pyarrow as pa  # type: ignore[import-untyped]
 import pyarrow.parquet as pq  # type: ignore[import-untyped]
 
 from quant_research_terminal.data.conversion import (
     bar_from_storage_row,
+    bar_from_storage_row_v3,
     bar_to_storage_row,
+    bar_to_storage_row_v3,
     quote_from_storage_row,
+    quote_from_storage_row_v3,
     quote_to_storage_row,
+    quote_to_storage_row_v3,
     trade_from_storage_row,
+    trade_from_storage_row_v3,
     trade_to_storage_row,
+    trade_to_storage_row_v3,
     validate_storage_schema,
+    validate_storage_schema_v3,
 )
 from quant_research_terminal.data.schemas import (
     BAR_ARROW_SCHEMA,
     QUOTE_ARROW_SCHEMA,
     TRADE_ARROW_SCHEMA,
+    arrow_schema_v3,
+)
+from quant_research_terminal.domain.dataset_identity import RecordType, require_record_type
+from quant_research_terminal.domain.futures_contract import (
+    FuturesContractId,
+    require_listed_contract,
 )
 from quant_research_terminal.domain.models import Bar, Quote, Trade
 
@@ -176,12 +189,28 @@ class StorageContractError(StorageError):
 
 
 def _record_label(schema: pa.Schema) -> str:
-    """Return the human-readable record type a schema describes."""
+    """Return the human-readable record type a schema describes.
+
+    Identity comparison against the version-2 singletons, with an explicit
+    fallback for anything else. A version-3 schema is **not** a module
+    constant — its metadata carries the dataset's contract, so it is built per
+    dataset — which is why every version-3 path passes its
+    :class:`RecordType` explicitly to :func:`_record_label_for` instead of
+    relying on this function. Before that split existed, every version-3 error
+    message would have claimed the file held bars.
+    """
     if schema is TRADE_ARROW_SCHEMA:
         return "trade"
     if schema is QUOTE_ARROW_SCHEMA:
         return "quote"
-    return "bar"
+    if schema is BAR_ARROW_SCHEMA:
+        return "bar"
+    return "unknown-record-type"
+
+
+def _record_label_for(record_type: RecordType) -> str:
+    """Return the human-readable label for an explicitly known record type."""
+    return require_record_type(record_type).value
 
 
 def _build_table(rows: Sequence[Mapping[str, Any]], schema: pa.Schema) -> pa.Table:
@@ -258,15 +287,17 @@ def _validate_metadata(schema: pa.Schema, path: Path) -> None:
         raise StorageContractError(f"{path} has incompatible schema metadata: {error}") from error
 
 
-def _validate_columns(schema: pa.Schema, expected: pa.Schema, path: Path) -> None:
+def _validate_columns(
+    schema: pa.Schema, expected: pa.Schema, path: Path, label: str | None = None
+) -> None:
     """Check that the file's columns match the expected record type exactly."""
     actual_names = tuple(schema.names)
     expected_names = tuple(expected.names)
 
     if actual_names != expected_names:
         raise StorageContractError(
-            f"{path} does not hold {_record_label(expected)} records: expected columns "
-            f"{expected_names}, found {actual_names}"
+            f"{path} does not hold {label or _record_label(expected)} records: expected "
+            f"columns {expected_names}, found {actual_names}"
         )
 
     for field in expected:
@@ -462,3 +493,193 @@ def read_schema_metadata(path: Path) -> dict[str, str]:
     if schema.metadata is None:
         return {}
     return {key.decode("utf-8"): value.decode("utf-8") for key, value in schema.metadata.items()}
+
+
+# --------------------------------------------------------------------------
+# Schema v3: canonical persisted identity
+#
+# Version 3 answers a question version 2 cannot: *which listed contract is
+# this?* The contract is supplied explicitly by the caller and written into
+# both the schema metadata and a per-row column. It is never derived from a
+# vendor alias — no venue, decade, or delivery year is inferred from a symbol
+# spelling anywhere in this module.
+# --------------------------------------------------------------------------
+
+
+@final
+class DatasetV3(NamedTuple):
+    """What a version-3 artifact declares, and its records in file order.
+
+    ``record_type`` is carried rather than discarded. A caller that reads an
+    artifact of unknown type through :func:`read_records_v3` needs to know which
+    type it got, and a caller checking an artifact against a claim needs to be
+    able to compare. Dropping it here was how a manifest claiming the wrong
+    record type could describe an *empty* artifact and be believed: with no rows
+    to contradict it, the declared type is the only evidence there is.
+    """
+
+    record_type: RecordType
+    contract: FuturesContractId
+    records: tuple[Any, ...]
+
+
+_V3_ENCODERS: Final[Mapping[RecordType, Any]] = {
+    RecordType.TRADE: trade_to_storage_row_v3,
+    RecordType.QUOTE: quote_to_storage_row_v3,
+    RecordType.BAR: bar_to_storage_row_v3,
+}
+
+_V3_DECODERS: Final[Mapping[RecordType, Any]] = {
+    RecordType.TRADE: trade_from_storage_row_v3,
+    RecordType.QUOTE: quote_from_storage_row_v3,
+    RecordType.BAR: bar_from_storage_row_v3,
+}
+
+
+def _write_v3(
+    path: Path,
+    records: Sequence[Any],
+    *,
+    record_type: RecordType,
+    contract: FuturesContractId,
+) -> None:
+    require_record_type(record_type)
+    require_listed_contract(contract)
+    label = _record_label_for(record_type)
+    encode = _V3_ENCODERS[record_type]
+    rows: list[Mapping[str, Any]] = []
+    for index, record in enumerate(records):
+        try:
+            rows.append(encode(record, contract))
+        except (ValueError, TypeError) as error:
+            raise StorageContractError(
+                f"{label} record {index} is not storable: {error}"
+            ) from error
+        except OverflowError as error:
+            raise StorageContractError(
+                f"{label} record {index} cannot be encoded for storage: {error}"
+            ) from error
+    schema = arrow_schema_v3(record_type, contract)
+    _write_table_atomically(_build_table(rows, schema), path)
+
+
+def _read_v3(
+    path: Path, *, record_type: RecordType, contract: FuturesContractId | None
+) -> DatasetV3:
+    """Read a version-3 artifact, validating identity before touching a row.
+
+    The order of checks matters and is deliberate: everything that can be
+    decided from metadata is decided first, so a file naming the wrong contract
+    costs one footer read rather than a full scan.
+    """
+    require_record_type(record_type)
+    if contract is not None:
+        require_listed_contract(contract)
+    label = _record_label_for(record_type)
+
+    if not path.exists():
+        raise FileNotFoundError(f"no such storage file: {path}")
+    try:
+        table = pq.read_table(path)
+    except pa.ArrowInvalid as error:
+        raise StorageContractError(f"{path} is not a readable Parquet file: {error}") from error
+
+    try:
+        declared_type, declared_contract = validate_storage_schema_v3(table.schema)
+    except ValueError as error:
+        raise StorageContractError(f"{path} has incompatible schema metadata: {error}") from error
+
+    expected_schema = arrow_schema_v3(declared_type, declared_contract)
+    _validate_columns(table.schema, expected_schema, path, label=_record_label_for(declared_type))
+
+    if declared_type is not record_type:
+        raise StorageContractError(
+            f"{path} holds {_record_label_for(declared_type)} records, not {label}"
+        )
+    if contract is not None and declared_contract != contract:
+        raise StorageContractError(
+            f"{path} holds {declared_contract.canonical()}, not the expected {contract.canonical()}"
+        )
+
+    rows = _read_rows_for_schema(path, expected_schema)
+
+    # Every row, not the first: a single divergent row is exactly the corruption
+    # this column exists to expose, and an empty artifact makes the check
+    # vacuous, which is why the metadata carries the identity too.
+    expected_identity = declared_contract.canonical()
+    offenders = [
+        index for index, row in enumerate(rows) if row["canonical_identity"] != expected_identity
+    ]
+    if offenders:
+        raise StorageContractError(
+            f"{path} claims to hold {expected_identity} but {len(offenders)} row(s) disagree; "
+            f"first at index {offenders[0]} with {rows[offenders[0]]['canonical_identity']!r}"
+        )
+
+    decode = _V3_DECODERS[declared_type]
+    return DatasetV3(
+        record_type=declared_type,
+        contract=declared_contract,
+        records=tuple(_reconstruct(rows, decode, path, label)),
+    )
+
+
+def _read_rows_for_schema(path: Path, expected: pa.Schema) -> list[dict[str, Any]]:
+    table = pq.read_table(path)
+    columns = {field.name: _column_values(table, field, path) for field in expected}
+    return [
+        {name: values[index] for name, values in columns.items()} for index in range(table.num_rows)
+    ]
+
+
+def write_trades_v3(path: Path, trades: Sequence[Trade], *, contract: FuturesContractId) -> None:
+    """Write trades as a version-3 artifact naming ``contract``.
+
+    Row order is preserved exactly; no sorting is applied.
+    """
+    _write_v3(path, trades, record_type=RecordType.TRADE, contract=contract)
+
+
+def read_trades_v3(path: Path, *, contract: FuturesContractId | None = None) -> DatasetV3:
+    """Read a version-3 trade artifact and the contract it names."""
+    return _read_v3(path, record_type=RecordType.TRADE, contract=contract)
+
+
+def write_quotes_v3(path: Path, quotes: Sequence[Quote], *, contract: FuturesContractId) -> None:
+    """Write quotes as a version-3 artifact naming ``contract``."""
+    _write_v3(path, quotes, record_type=RecordType.QUOTE, contract=contract)
+
+
+def read_quotes_v3(path: Path, *, contract: FuturesContractId | None = None) -> DatasetV3:
+    """Read a version-3 quote artifact and the contract it names."""
+    return _read_v3(path, record_type=RecordType.QUOTE, contract=contract)
+
+
+def write_bars_v3(path: Path, bars: Sequence[Bar], *, contract: FuturesContractId) -> None:
+    """Write bars as a version-3 artifact naming ``contract``."""
+    _write_v3(path, bars, record_type=RecordType.BAR, contract=contract)
+
+
+def read_bars_v3(path: Path, *, contract: FuturesContractId | None = None) -> DatasetV3:
+    """Read a version-3 bar artifact and the contract it names."""
+    return _read_v3(path, record_type=RecordType.BAR, contract=contract)
+
+
+def read_dataset_descriptor(path: Path) -> tuple[RecordType, FuturesContractId]:
+    """Return what a version-3 artifact says it holds, without reading rows."""
+    if not path.exists():
+        raise FileNotFoundError(f"no such storage file: {path}")
+    try:
+        schema = pq.read_schema(path)
+    except pa.ArrowInvalid as error:
+        raise StorageContractError(f"{path} is not a readable Parquet file: {error}") from error
+    try:
+        return validate_storage_schema_v3(schema)
+    except ValueError as error:
+        raise StorageContractError(f"{path} has incompatible schema metadata: {error}") from error
+
+
+def read_records_v3(path: Path) -> DatasetV3:
+    """Read a version-3 artifact of whichever record type it declares."""
+    record_type, _ = read_dataset_descriptor(path)
+    return _read_v3(path, record_type=record_type, contract=None)

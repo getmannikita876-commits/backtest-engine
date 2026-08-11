@@ -32,7 +32,7 @@ from collections import defaultdict
 from collections.abc import Sequence
 from datetime import datetime
 
-from quant_research_terminal.data.contracts import SCHEMA_VERSION
+from quant_research_terminal.data.contracts import SUPPORTED_SCHEMA_VERSIONS
 from quant_research_terminal.data_import.contracts import (
     DuplicatePolicy,
     ImportBatch,
@@ -58,8 +58,14 @@ def _schema_version_issue(batch: ImportBatch) -> ValidationIssue | None:
 
     This is a property of the batch, not of any row, so it is raised once
     regardless of how many rows the batch carries.
+
+    Accepts any version the storage layer can read, rather than only the
+    current one. The two versions differ in how identity is *persisted*, not in
+    the shape of an imported row — a version-3 artifact takes its canonical
+    contract out of band — so a batch is not made invalid by the storage layer
+    gaining a newer schema.
     """
-    if batch.schema_version == SCHEMA_VERSION:
+    if batch.schema_version in SUPPORTED_SCHEMA_VERSIONS:
         return None
     return ValidationIssue(
         severity=ValidationSeverity.FATAL,

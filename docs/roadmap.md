@@ -421,11 +421,11 @@ else. See ADR-011.
   mechanism, kept separate from the calendar's evidence-strength
   `VerificationStatus`; Phase 2.1 is untouched.
 
-Not implemented, deliberately: continuous **price** construction and
+Not implemented in 2.2, deliberately: continuous **price** construction and
 back-adjustment (no placeholder API), volume/open-interest roll rules,
 `RollObservation`, tie and oscillation policies, an instrument→calendar
-registry, persisted roll artifacts, schema v3, dataset catalog, replay, and
-execution. `SCHEMA_VERSION` remains 2.
+registry, persisted roll artifacts, replay, and execution. Schema v3 and the
+dataset catalog arrived in Phase 2.3 below.
 
 **Falsification record.** Pass 1 attacked all ten brief-specified defects
 (broken chain links, duplicate roll instants, coverage gaps, hash omissions,
@@ -453,6 +453,101 @@ final tradable *instant* from calendar windows was explicitly rejected as
 unwarranted; LTD-anchored rolls cannot express first-notice-date anchoring; and
 no roll data ships, so any schedule built on the shipped calendar inherits its
 2023-05-22 … 2023-12-29 range.
+
+## Phase 2.3 — Dataset catalog, provenance, and persisted identity (complete)
+
+Answers *exactly which immutable canonical market-data dataset artifact is
+this?* without relying on a filename, a path, a provider's state, a clock, or
+any inference from a vendor alias. See ADR-012.
+
+- **Three identities, never collapsed.** `SemanticDatasetHash` (what the data
+  means), `PhysicalArtifactHash` (which exact bytes), `ManifestHash` (which
+  claims and provenance). Keeping them apart is what lets verification report a
+  harmless re-encode as `PHYSICAL_MISMATCH` and an edited dataset as
+  `SEMANTIC_MISMATCH`.
+- **Schema v3.** `instrument_symbol` is replaced by `canonical_identity` (exactly
+  `FuturesContractId.canonical()`) plus `vendor_symbol` (provenance, never
+  truth). Identity also lives in the schema metadata, because an **empty**
+  artifact is legal and has no rows to carry it. `SCHEMA_VERSION` is now 3;
+  `LEGACY_SCHEMA_VERSION` is 2 and every v2 writer, reader, and import path is
+  byte-for-byte unchanged.
+- **The semantic hash** is a framed, single-pass SHA-256 over decoded *domain
+  records* — not stored columns, because `parse_trade_side` normalises — with a
+  per-field signedness table, a derived schema token, and a row-count footer. It
+  excludes vendor alias, provider, path, codec, layout, clock, and even
+  `schema_version`.
+- **Order is semantic; sorting is forbidden** in the hasher, and duplicates
+  survive exactly (ADR-003). The order pinned is the artifact's *stored* order,
+  which is explicitly **not** the future replay total order.
+- **Migration is explicit or it does not happen.** Alias → exact contract,
+  supplied by the caller; every alias must resolve. No symbol parsing, no
+  current-year default, no month-cycle arithmetic. A source spanning two
+  contracts is refused rather than split, and the source is never modified.
+- **The manifest has no location field at all**, so relocation cannot change
+  identity by construction. Time bounds come from a full scan, never
+  first-and-last, because storage never sorts.
+- **The catalog** publishes immutable manifests under `<manifest_hash>.json` and
+  a rebuildable `index.json`. One semantic hash may have **many** manifests, so
+  lookup returns a deterministic tuple and a second registration of the same
+  records is not a collision.
+- **Resolution is two hops**, each owned by the layer that knows it:
+  `ManifestHash → PhysicalArtifactHash` from the immutable manifest, then
+  `PhysicalArtifactHash → locations` from the index. The index stores nothing the
+  manifest already states, so a manifest is never bound to a path and rebuild is
+  total — a manifest resolves through any surviving byte-identical copy.
+- **No false dependencies.** Raw listed-contract datasets pin no calendar and no
+  roll schedule; the manifest has no field that could carry one.
+
+Not implemented, deliberately: revision/supersedes graphs, late-arriving
+corrections, replay and its ordering, execution, portfolio, strategies,
+continuous-price synthesis, options, SQL or remote catalogs, distributed
+locking, and UI. The import pipeline still writes v2, because v3 needs a
+contract it has no evidenced way to derive from an alias.
+
+**Falsification record.** Pass 1 attacked all 25 brief-specified defects — order
+sensitivity, re-encode divergence, byte-copy stability, unmapped aliases,
+falsified claims, post-registration replacement, v2-as-v3, false calendar and
+roll pins, clock and randomness, path leakage, index loss, `model_copy` bypass,
+`source_index` dependence, framing ambiguity, multi-instrument migration, empty
+identity — all held. The phase's own tests found one defect: an empty
+`SYMBOL_MAPPING` was rejected, making migration of an empty v2 artifact
+unrepresentable.
+
+Pass 2 (independent hostile review of the whole diff) was again the productive
+one: six defects and four weaknesses, all fixed with regression tests. The
+load-bearing ones: a manifest's **`record_type` was never verified**, so for an
+empty artifact a wrong-type claim verified *and registered*; `rebuild_index`
+keyed manifests by physical hash and therefore collapsed the documented
+one-to-many case, dropping one registration and inventing another in its place;
+migration did not check `destination != source`, so it could destroy its own
+input and record provenance pointing at its own output; `verify_registration`
+could raise instead of returning an outcome, because `SemanticEncodingError`
+descends from `Exception` rather than `ValueError`; and `OverflowError` — an
+`ArithmeticError`, the same trap the storage layer documents — let a corrupt
+manifest escape the catalog's error taxonomy. Two overclaims were removed
+(unused exported errors, unreachable filter branches described as protection),
+and the determinism sweep's own blind spot was closed: `data/artifact_hash.py`
+and `domain/common.py` hold half the phase's guarantees and were covered by no
+guard at all.
+
+A final architecture review retracted one claim from the falsification write-up.
+"Byte-identical artifacts under different manifests are unrecoverable once the
+index is lost" was **wrong**, and wrong because of a design defect rather than a
+reporting slip: the index bound `ManifestHash → ArtifactLocation`, duplicating
+the manifest's own `physical_hash` into mutable state and asserting a
+manifest↔path pairing nothing needs. Indexing `PhysicalArtifactHash → locations`
+instead makes rebuild total, so both manifests recover from a single surviving
+copy. `CatalogEntry` lost two fields, `AmbiguousArtifactBindingError` was
+deleted, and `find_by_semantic_hash` now reads published manifests — so it works
+with no index at all.
+
+Known limitations, stated rather than hidden: durability is **not** claimed —
+`os.replace` gives visibility atomicity only, no `fsync` is called, and
+directory `fsync` has no Windows equivalent, so recovery is detection rather
+than prevention; the index's read-modify-write is not atomic, so a single
+registering process per catalog root is assumed; an empty artifact's identity is
+uncorroborated by rows, and what detects tampering there is the manifest, not
+the reader; and SHA-256 here is integrity, not authenticity.
 
 ## Later phases (gated)
 
