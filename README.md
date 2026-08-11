@@ -168,13 +168,53 @@ inference from a vendor alias. See
 `fsync` is called, and directory `fsync` has no Windows equivalent — so the
 recovery story is detection, which is what the physical hash is for.
 
+## Correction lineage and cross-batch comparison
+
+Datasets are immutable, but corrections are real. A correction is recorded as a
+**separate immutable claim** beside the data, never as a change to it. See
+`docs/adr/ADR-013-dataset-revision-lineage-and-cross-batch-consistency.md`.
+
+- **A pinned dataset stays pinned, forever.** After `B supersedes A`, asking for
+  A returns exactly A — same manifest, same three hashes, same verification. The
+  successor appears only in the lineage graph. Nothing anywhere redirects.
+- **`DatasetManifest` is unchanged.** It gains no `parent` or `supersedes` field:
+  a claim is usually made *after* both manifests exist and a manifest is
+  immutable, and the manifest hash covers every field — so such a field would
+  change a dataset's identity because something was later said *about* it.
+- **Corrections are declared, never inferred.** Different semantic hashes prove
+  nothing on their own; identical ones cannot be a correction at all, because
+  that is provider or encoding variation with no corrected data in it.
+- **The graph branches and joins.** `A → B` and `A → C` are both valid, and
+  **neither is chosen** — there is no `latest`, `current`, or `preferred`, and a
+  build-failing test keeps it that way. Cycles are refused.
+- **Comparison is an explicit call** that reports evidence and returns an
+  ephemeral value object. It is never consulted during import, so an import's
+  result never depends on what else is in the local catalog.
+- **Bars have a real key** — contract plus period (ADR-005) — so disagreement
+  about one period is a *proven conflict*, with no direction implied. Duplicate
+  periods are refused rather than resolved by a first-wins guess.
+- **Trades and quotes do not.** ADR-003 established that they carry no logical
+  event identity, so comparison reports exact-row differences and multiplicities
+  and never claims one row corrects another. A shared timestamp is not an
+  identity.
+
+**Lineage is not a point-in-time capability.** It records corrections known to
+the platform *now*. It cannot say when a correction became historically
+available — no manifest carries a trustworthy source-publication time, and
+catalog write time, file mtime, and registration order all measure when this
+machine learned something rather than when the data was revised. Answering
+"would this have been available on date T?" needs source-backed availability
+semantics that no provider here supplies, so the capability is absent rather
+than approximated.
+
 ## What is not implemented
 
 Replay, execution, strategies, portfolio, options, Monte Carlo, prop-firm
-evaluation, DuckDB, SQL or remote catalogs, dataset partitioning, provider
+evaluation, DuckDB, SQL or graph databases, dataset partitioning, provider
 registry, live or historical vendor APIs, credential handling, and experiment
-tracking. Revision/supersedes graphs and late-arriving corrections are also out
-of scope: the catalog describes artifacts, it does not model their history.
+tracking. Also deliberately absent: automatic merge or reconciliation of
+disagreeing datasets, cross-provider preference, revision numbers, and any
+point-in-time "what was known then" reconstruction.
 
 Also not implemented: research session segmentation (RTH/ETH labels over the
 calendar), instrument→calendar mapping, calendar facts outside the verified
