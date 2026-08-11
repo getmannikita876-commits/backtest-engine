@@ -104,19 +104,23 @@ Every event must have deterministic ordering.
 
 
 
-Sorting priority:
+\*\*Amended by ADR-014 (Phase 3).\*\* The original priority list read \"1. Timestamp (UTC) 2. Event Type Priority 3. Sequence Number\". The implemented ordering is:
 
 
 
-1\. Timestamp (UTC)
+1\. \*\*Availability time (UTC)\*\* decides which ReplayFrame an observation belongs to. Every observation sharing an instant is delivered in one frame.
 
 
 
-2\. Event Type Priority
+2\. \*\*Within a frame\*\*, events are stored by (source manifest digest, original row ordinal). That order is deterministic and \*\*explicitly non-causal\*\*: it exists for serialization, debugging, and test equality, and carries no claim about exchange sequence.
 
 
 
-3\. Sequence Number
+\*\*Event Type Priority does not exist and must not be added.\*\* The repository holds no evidence that a trade is knowable before a quote at the same persisted microsecond, so a priority table would be a fabricated causal order presented as a convention.
+
+
+
+\*\*Sequence Number does not exist.\*\* Trades and quotes carry no persisted logical event identity (ADR-003), so there is no sequence to sort by. A row ordinal is provenance — a position in an immutable artifact — and is never presented as a market event id.
 
 
 
@@ -129,6 +133,10 @@ Never depend on:
 \- dictionary order
 
 \- filesystem order
+
+\- caller argument order
+
+\- provider, vendor symbol, file path, or physical encoding
 
 
 
@@ -168,15 +176,15 @@ Historical timestamps are immutable.
 
 
 
-Replay owns the clock.
+\*\*Amended by ADR-014 (Phase 3).\*\* There is no clock object to own.
 
 
 
-Strategies must never ask the operating system for current time.
+Replay time \*is\* the ReplayFrame's availability time. A separate mutable clock would be a second, weaker copy of it, and wall-clock pacing would make a research run's output depend on CPU speed. No tick(), advance(), sleep(), or speed() exists.
 
 
 
-The replay engine is the only time authority.
+The intent of the original rule is preserved and strengthened: consumers must never ask the operating system for the current time, and the frame's availability time is the only time authority.
 
 
 
@@ -344,7 +352,11 @@ when available.
 
 
 
-Replay processes one event at a time.
+\*\*Amended by ADR-014 (Phase 3).\*\* Replay processes one \*frame\* at a time.
+
+
+
+A frame holds every observation that became available at one instant, and is processed atomically. Per-event delivery is precisely the look-ahead mechanism ADR-014 rejects: it would create a decision boundary between simultaneous observations that the data does not license.
 
 
 

@@ -7,8 +7,13 @@ The layering below this package is strict. Identity value objects and the
 semantic encoding live in ``domain``; physical byte hashing and Parquet I/O
 live in ``data``; this package composes them into manifests, registration, and
 a rebuildable location index. Nothing here is imported by either layer beneath
-it, and nothing here reaches for replay, execution, strategy, or UI — none of
-which exist.
+it.
+
+Nothing here reaches *upward* either. ``quant_research_terminal.replay`` now
+exists and consumes this package — the dependency runs that way and only that
+way, so a replay concern can never become a catalog concern. Execution,
+strategy, and UI still do not exist; the assertion is that none of them appears
+here later, and the architecture tests enforce all four edges.
 """
 
 from quant_research_terminal.catalog.comparison import (

@@ -12,6 +12,7 @@ Dependencies point inward, and never the other way:
 UI -> Application -> Data Import -> Storage -> Domain
                                    Calendars -> Domain
                           Catalog -> Storage -> Domain
+                           Replay -> Catalog -> Storage -> Domain
 ```
 
 `calendars/` is a data package beside the pipeline: it ships versioned
@@ -40,6 +41,11 @@ domain, and nothing in the domain depends back on it.
   *above* storage and the domain and is imported by neither. It composes the
   domain's identity types with the storage layer's files; it owns no market-data
   semantics of its own. See below and `docs/data-contracts.md`.
+- **Replay** (`replay/`) — turns verified dataset artifacts into a deterministic
+  availability timeline (ADR-014). It sits *above* the catalog, storage, and the
+  domain, and is imported by none of them. Its pure value types live in
+  `domain/replay.py`, which depends on nothing above the domain. See below and
+  `docs/replay.md`.
 - **Data Import** (`data_import/`) — providers, validation, normalization, and
   the orchestration that sequences them. See `docs/data-import.md`.
 - **Application** (`application/`) — use cases that orchestrate the layers
@@ -338,6 +344,66 @@ catalog/comparison.py        explicit dataset-to-dataset comparison
   and quotes have no logical event identity (ADR-003), so no correction is ever
   inferred for them and a shared timestamp is not treated as one.
 
+## Deterministic replay
+
+Replay answers *what information becomes available next?* — and nothing else
+(ADR-014).
+
+```
+domain/replay.py     pure: ReplayRange · ReplayConfig · ReplayEvent · ReplayFrame
+      ▲
+replay/prepare.py    resolve · verify · snapshot   (reads catalog + storage)
+replay/stream.py     prepared sources → frame timeline   (no IO)
+replay/errors.py     the typed failures, each with one real trigger
+```
+
+- **The frame is the fundamental unit, and it is an anti-look-ahead
+  mechanism.** Every observation sharing an availability time is delivered in one
+  `ReplayFrame`, processed atomically. Delivering simultaneous observations one
+  at a time would create a decision boundary the data does not license — nothing
+  persisted proves a trade was knowable before a quote at the same microsecond
+  (ADR-003 records that neither carries a logical event identity). A decision
+  taken in that gap is look-ahead bias that reproduces perfectly.
+- **Intra-frame order is technical and explicitly non-causal**:
+  `(source manifest digest, row ordinal)`. Built from provenance rather than
+  market meaning, so it cannot be mistaken for sequence. No record-type,
+  contract, provider, vendor-symbol, physical-hash, or path component exists,
+  and an architecture test refuses a `RecordType`-keyed mapping *literal* in a
+  replay module — supplementary to the API allowlist, which is the real guard
+  because it refuses any new public name until it is added deliberately.
+- **Availability time is the payload's own canonical timestamp**, and a caller
+  cannot disagree with it. For bars that is the interval close (ADR-002),
+  structurally rather than by validation. For trades and quotes the equality is a
+  property of the current data contract — there is no second persisted
+  coordinate — and is deliberately *not* stated as a claim that feed latency is
+  zero.
+- **Inputs are exact `ManifestHash` values, canonicalized as a set.** No
+  filename, alias, contract, continuous series, or "latest" resolves to a replay
+  input, and caller order cannot become hidden configuration semantics.
+- **Nothing is repaired.** Sources are never sorted — an out-of-order source is
+  refused, since stored row order is part of semantic identity (ADR-012), and
+  sorting would emit semantics no published hash describes. Rows are never
+  deduplicated (ADR-003) and ordinals are never renumbered after filtering.
+- **Replay is not a reconciliation layer.** Two manifests pinning one
+  `SemanticDatasetHash` are refused, and so are two overlapping selected
+  histories of one `(contract, record type)` — explicitly *not* as a claim that
+  they disagree, but because a union of unreconciled histories is not an observed
+  sequence. Disjoint shards are allowed; concatenating them invents nothing.
+- **Lineage independence is structural.** The package imports no supersedes
+  navigation and no comparison, so a configuration pinning A cannot be redirected
+  to a later B. A run that pinned some bytes consumed those bytes.
+- **Preflight is total, then the rows are a snapshot.** Every source is verified
+  before any frame exists, through *any* byte-identical copy the index knows of;
+  the rows are then held in memory, so the guarantee becomes "this run no longer
+  depends on the file" rather than "the file is safe".
+- **No calendar and no roll schedule are required.** No trading date is derived,
+  no session or halt event is synthesised, and no contract is auto-switched.
+  Those are consumer concerns layered over a timeline, not properties of one.
+
+Memory scales with the selected input artifacts; the implementation is
+correctness-first, in-memory, and unprofiled. The public contracts say nothing
+about how rows are held, so a streaming rewrite would change no frame semantics.
+
 ## Research invariants
 
 Market timestamps, exchange calendars, dataset provenance, configuration
@@ -349,6 +415,10 @@ A future `RunManifest` can pin its inputs with each dataset's
 adds provenance), plus — separately, and only where relevant — a calendar content
 hash (ADR-010) and a roll-schedule content hash (ADR-011). All four are exposed
 today; none of that orchestration is implemented.
+
+Replay is deliberately shaped so that such a manifest has something exact to pin:
+a run's entire input is `(a set of ManifestHash values, an optional ReplayRange)`,
+both immutable value objects, neither resolved against catalog state at run time.
 
 Publishing lineage **after** a run does not alter that pin — the run consumed the
 bytes it consumed. A future tool may surface "this dataset has successors" beside

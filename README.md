@@ -3,10 +3,11 @@
 A local Windows desktop application supporting professional, reproducible
 quantitative research on futures.
 
-The build is a **data foundation**, not a backtester. There is no backtest
-engine, replay engine, execution simulator, strategy API, options support,
-optimization, or AI feature, and none is planned before the foundation is
-correct.
+The build is a **data foundation plus a deterministic replay engine**, not a
+backtester. Replay turns verified datasets into an availability timeline and
+stops there: there is no backtest engine, market state, execution simulator,
+strategy API, portfolio, options support, optimization, or AI feature, and none
+is planned before the foundation is correct.
 
 ## What is implemented
 
@@ -30,6 +31,9 @@ correct.
 | Futures rollover mapping (instant → listed contract) | implemented |
 | Continuous-series identity (non-executable) | implemented |
 | Continuous **price** series (back-adjustment) | **not implemented**, deliberately |
+| Dataset revision lineage (supersedes claims, cross-batch comparison) | implemented |
+| **Deterministic replay** (verified datasets → availability timeline) | implemented |
+| Market state, strategies, execution, portfolio | **not implemented** |
 
 ## Futures instrument identity
 
@@ -207,14 +211,75 @@ machine learned something rather than when the data was revised. Answering
 semantics that no provider here supplies, so the capability is absent rather
 than approximated.
 
+## Deterministic replay
+
+Replay answers one question — *what information becomes available next?* — and
+refuses to answer any other. See `docs/replay.md` and
+`docs/adr/ADR-014-deterministic-replay-and-simultaneous-observation-frames.md`.
+
+    same exact ManifestHash input set + same ReplayRange = same ReplayFrame stream
+
+verified across repeated calls, fresh preparations, separate processes,
+`PYTHONHASHSEED` values, storage layouts, and later lineage claims — and, more
+strongly than any of those, in a child process where **every clock read raises**.
+
+- **The frame is the unit, and that is the anti-look-ahead decision.** Every
+  observation that became available at one instant is delivered in **one**
+  `ReplayFrame`, processed atomically. Delivering them one at a time would let a
+  consumer decide in between — on a sequencing artifact, because nothing
+  persisted proves a trade was knowable before a quote at the same microsecond.
+  That decision would be look-ahead bias that reproduces perfectly and looks
+  entirely plausible.
+- **Order inside a frame is technical, never causal.** Events are stored by
+  `(source manifest digest, original row ordinal)`, built from provenance
+  precisely so nobody mistakes it for market meaning. There is no
+  trade-before-quote rule, no bar priority, no contract, provider, path, or
+  physical-encoding tie-break — and a build-failing test refuses a
+  `RecordType`-keyed mapping *literal* in a replay module, backed by an allowlist
+  that refuses any new public name at all.
+- **A bar becomes observable exactly at its interval close** (ADR-002), never at
+  its interval start and never a microsecond early. Structural, not validated:
+  availability is a derived property with no field to put a wrong value in.
+- **Trade and quote availability is stated honestly.** It equals the persisted
+  timestamp because that is the only timestamp there is. This is *not* a claim
+  that feed latency is zero. No latency model exists and none is approximated.
+- **Inputs are exact `ManifestHash` values.** Not a filename, a vendor symbol, a
+  contract, a continuous series, or "the latest revision". They form a *set*,
+  stored sorted, so caller order cannot become hidden semantics.
+- **Nothing is repaired.** Sources are never sorted — an out-of-order source is
+  refused, because stored row order is part of a dataset's semantic identity.
+  Repeated rows are never deduplicated. Row ordinals are never renumbered, even
+  after range filtering.
+- **Replay never reconciles and never redirects.** Two manifests pinning one
+  dataset are refused, as are two overlapping histories of one stream — not
+  because the data conflicts, but because replay will not present an
+  unreconciled union as one observed sequence. Lineage is never consulted: the
+  package imports no successor navigation, so a run that pinned some bytes
+  consumed those bytes.
+- **Full preflight, then a snapshot.** Every artifact is verified before any
+  frame exists, so there is no partial replay; every indexed location is tried,
+  so one stale index entry cannot hide a valid copy. The verified rows are then
+  held in memory, so later changes to the file cannot change the run.
+- **No clock, no seek.** Replay time *is* the frame's availability time. A range
+  filters the raw information stream; it does not reconstruct accumulated state,
+  which is why it is not called a seek.
+
+Memory scales with the selected input artifacts and is unprofiled; a dataset
+larger than memory is not supported yet.
+
 ## What is not implemented
 
-Replay, execution, strategies, portfolio, options, Monte Carlo, prop-firm
+Market state, execution, strategies, portfolio, options, Monte Carlo, prop-firm
 evaluation, DuckDB, SQL or graph databases, dataset partitioning, provider
 registry, live or historical vendor APIs, credential handling, and experiment
 tracking. Also deliberately absent: automatic merge or reconciliation of
 disagreeing datasets, cross-provider preference, revision numbers, and any
 point-in-time "what was known then" reconstruction.
+
+Replay deliberately excludes a replay clock, wall-clock pacing, true seek or
+checkpointing, market state, strategy callbacks, orders, fills, latency and queue
+models, a run manifest, a replay stream hash, any persisted replay artifact, and
+any calendar, roll-schedule, or continuous-series dependency.
 
 Also not implemented: research session segmentation (RTH/ETH labels over the
 calendar), instrument→calendar mapping, calendar facts outside the verified

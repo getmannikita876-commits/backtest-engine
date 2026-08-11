@@ -665,10 +665,174 @@ dataset have been available to a strategy on date T?"* is unanswerable here, and
 is deliberately not approximated: a fake as-of capability would inject exactly
 the look-ahead bias ADR-002 exists to prevent.
 
+## Phase 3 — Deterministic replay engine (complete)
+
+Answers *"what information becomes available next?"* — and refuses to answer any
+other question. See ADR-014 and `docs/replay.md`.
+
+- **The contract**: same exact `ManifestHash` input set plus the same
+  `ReplayRange` produces the same `ReplayFrame` stream — proven across repeated
+  calls, fresh preparations, separate processes, several `PYTHONHASHSEED` values,
+  a child process in which every clock read raises, every caller permutation,
+  artifact relocation,
+  multiple byte-identical copies, and a later lineage publication.
+- **`ReplayFrame` is the fundamental unit, and that is the phase's central
+  anti-look-ahead decision.** Every observation sharing an availability time is
+  delivered in **one** frame, processed atomically. A flat per-event stream would
+  create a decision boundary between simultaneous observations that the data does
+  not license — nothing persisted proves a trade was knowable before a quote at
+  the same microsecond (ADR-003). A decision taken in that gap is deterministic
+  look-ahead: it reproduces perfectly, every timestamp looks correct, and every
+  result looks plausible.
+- **Intra-frame order is technical and explicitly non-causal**: `(source manifest
+  digest, row ordinal)`. Deliberately built from provenance rather than market
+  meaning, so a convention cannot be mistaken for a claim. No record-type,
+  contract, provider, vendor-symbol, physical-hash, or path component exists, and
+  an architecture test refuses a `RecordType`-keyed mapping *literal*, backed by
+  an API allowlist that refuses any new public name whatsoever.
+- **Availability semantics.** `Bar` becomes observable exactly at its interval
+  close (ADR-002) — never at its start, never a microsecond early — structurally
+  rather than by validation. `Trade` and `Quote` availability equals the
+  persisted timestamp because the schema has no second coordinate; this is
+  documented as a **limitation of the data contract**, explicitly not as a claim
+  that feed latency is zero. No latency model exists and none is approximated.
+- **Exact inputs only.** A replay input is an exact `ManifestHash`. Refused: a
+  filename, a vendor alias, a `FuturesContractId`, a `SemanticDatasetHash`, a
+  `PhysicalArtifactHash`, a `ContinuousSeriesId`, and any query for "the latest".
+  Inputs are semantically a **set**, stored sorted by digest, so caller order
+  cannot become hidden configuration semantics.
+- **Nothing is repaired.** Sources are never sorted — an out-of-order source is
+  refused over its **whole** extent, before any range filtering, so a dataset's
+  validity never depends on which window is asked for. Sorting would emit
+  semantics no published `SemanticDatasetHash` describes *and* hide the defect.
+  Repeated rows survive (ADR-003); ordinals are never renumbered after filtering.
+- **Replay is not a reconciliation layer.** Two manifests pinning one semantic
+  dataset are refused; so are two overlapping selected histories of one
+  `(contract, record type)` — explicitly **not** as a claim that they disagree,
+  but because a union of unreconciled histories is not an observed sequence.
+  Disjoint shards are allowed, because concatenating them invents nothing.
+- **Lineage independence is structural, not a policy.** The package imports no
+  supersedes navigation and no comparison, so publishing `B supersedes A` leaves
+  a configuration pinning A byte-for-byte unchanged.
+- **Total preflight, then a snapshot.** Every artifact is verified before any
+  frame exists — no partial replay — through *any* byte-identical copy the index
+  knows of, repeating Phase 2.4's stale-location fix with its own regression. The
+  rows are then verified a second time as loaded, closing the check-then-use gap,
+  and held in memory: the honest guarantee is "this run no longer depends on the
+  file", not "the file is safe".
+- **Zero-source and duplicate-manifest configurations are unconstructible**
+  rather than rejected later, following ADR-013's treatment of duplicate
+  predecessors. Consequently no `DuplicateReplayManifestError` exists, and
+  `replay/errors.py` says why — `catalog/errors.py`'s rule that an unused error
+  taxonomy is a set of promises nothing keeps.
+- **`docs/replay_rules.md` was amended, not left to rot.** Three Phase 0 clauses
+  were contradicted by the implementation and are corrected in place with the
+  reasoning: "Event Type Priority" (a fabricated causal order, refused), "Replay
+  processes one event at a time" (now one *frame* at a time), and "Replay owns
+  the clock" (there is no clock object; replay time is the frame's availability
+  time). Everything else in that document stands and is implemented.
+
+Not implemented, deliberately: `MarketState`, strategy interfaces and callbacks,
+signals, features, indicators, orders, fills, execution, portfolio, PnL,
+slippage, commission, latency and queue models, `RunManifest`, an experiment
+registry, wall-clock pacing, a `ReplayClock`, true seek or checkpointing, GUI
+playback, `ReplayStreamHash`, any persisted replay artifact or cache, catalog
+writes, continuous-series source selection, rollover or calendar event
+generation, options, and schema v4. `SCHEMA_VERSION` remains 3 and the import
+pipeline is untouched.
+
+**Falsification record.** Pass 1 attacked all 60 brief-specified defects — bars
+at interval start or a microsecond early, invented trade/quote latency, silent
+sorting, backwards replay time, reordered equal-time rows, record-type priority,
+split instants, caller-order and path and provider dependence, physical-hash
+ordering, duplicate semantic replay, accepted overlap, automatic reconciliation,
+lineage redirect, v2 alias inference, continuous-series input, derived trading
+dates, calendar and roll dependency, corruption discovered after the first frame,
+skipped sources, deduplicated rows, renumbered ordinals, range boundary errors,
+crashing empty sources, silently-empty zero-source configs, `model_copy` bypass,
+hidden subclass state, set/dict nondeterminism, wall clock, randomness, seek and
+checkpoint creep, market-state and execution creep, and path leakage into the
+event. **All held**, and pass 1's own additional probes (odd bar intervals,
+pre-1970 instants, a 2000-row simultaneous burst, snapshot survival, six-way
+permutation of three simultaneous sources) held too.
+
+Pass 1 produced two changes. One was a documentation overclaim: `PreparedSource`
+said its contract and record type were "taken from the artifact" when they are
+the manifest's claims *verified against* the artifact — a distinction that
+matters because a reader should be able to see which fact is doing the work. The
+other was a genuine hardening gap: strictly increasing frame times *followed*
+from every source being validated non-decreasing, but `PreparedSource` is a
+`NamedTuple` and does not validate, so the premise was bypassable and the
+conclusion was unchecked. Replay time running backwards is the worst outcome this
+phase can produce, so it is now caught on the way **out** by
+`ReplayInvariantError` rather than merely implied by the input validation.
+
+One naming change was forced by the phase's own guards, and correctly: the frame
+merge was called `merge_frames`, and the forbidden-concept test flagged "merge"
+because in this codebase that word means ADR-013 dataset reconciliation. It is a
+k-way merge in the *sorting* sense and is now `frame_timeline`, with the
+distinction stated where the algorithm is described.
+
+Pass 2 (independent hostile review of the whole diff) was again the productive
+one: two defects, five weaknesses, three nits — all accepted and fixed.
+
+The two defects were both **tests and documents that could not fail**, which is
+this project's recurring failure mode rather than a new one. First, a
+`PreparedRow` whose cached availability time disagreed with its payload steered
+every decision the interleave makes and was caught only when the event was
+finally constructed — after earlier frames had reached the consumer, and as a raw
+`ValidationError` rather than a `ReplayError`. That is exactly the partial replay
+`replay/prepare.py` calls worse than a failure, reachable through the public API,
+while `PreparedRow`'s own docstring asserted the drift was impossible.
+`frame_timeline` is no longer a generator function: it validates every source
+eagerly and returns the iterator separately, so both `NamedTuple`-bypass
+invariants now fail the *call* and emit nothing.
+
+Second, `test_the_stream_survives_a_different_process_timezone` **could not fail
+on Windows** — `TZ` does not affect the C runtime's local time there and
+`time.tzset` does not exist, so all three parametrised cases ran in one effective
+zone — and three documents cited it as verification. It is replaced by a child
+process in which `datetime.now`, `utcnow`, `today`, `fromtimestamp`, `time.time`,
+`time_ns`, `monotonic`, `perf_counter`, `localtime`, `gmtime`, and `sleep` all
+raise, which is platform-independent and strictly stronger: it does not ask
+whether replay reads a *different* time, it proves replay reads none. The `TZ`
+run is kept, renamed, and documented as a POSIX-only smoke check.
+
+The load-bearing weaknesses: the phase's new ambient-state sweep was **weaker
+than the two already in the same file**, dropping `time`, `locale`, and `os`
+from the import denylist and omitting `time.time` from the banned calls — so
+`import time` plus `time.time()` passed every new guard in the two modules that
+actually produce the timeline, while identical code in
+`domain/dataset_identity.py` failed the build; a canary now pins the new sweep as
+a superset of both older ones. `RECORD_PAYLOAD_TYPES`, published by this phase so
+replay and the semantic encoder share one table, was a **live mutable `dict`**
+aliased to the private name — `Final` binds a checker, not the interpreter — so
+one assignment would have corrupted dataset identity and replay's payload
+discriminator together; it and the two sibling identity tables are now
+`MappingProxyType`. And the chained cause of `ReplayArtifactVerificationError`
+was the *first* location's failure rather than the most severe, discarding the
+very distinction ADR-012 keeps the physical and semantic identities apart to
+preserve: an operator told a copy was missing would never learn that a surviving
+copy had been **altered**.
+
+One finding was accepted as correct and documented rather than changed: because
+overlap is judged on what a run *selected*, narrowing a `ReplayRange` can make
+two globally-overlapping datasets acceptable and compose their disjoint shards.
+That timeline is unambiguous, but replay does not warn that the datasets disagree
+outside the window. The asymmetry with whole-artifact monotonicity validation is
+deliberate — a source's validity must not depend on who is asking; a run's
+ambiguity genuinely is a property of what it consumed — and it is now stated in
+`docs/replay.md`, in ADR-014's limitations, and pinned by a test.
+
+Three overclaims were removed: "covered by a property test" (there is no
+property-based testing here), "faster than maintaining a priority queue"
+(unprofiled, which `CLAUDE.md` forbids), and "read more than once" for what is
+actually five file touches and two record hashes per source.
+
 ## Later phases (gated)
 
-Deterministic replay, strategy APIs, execution simulation, experiments, and
-analytics begin only after the import foundation is accepted. Options, Rust
-migrations, AI assistance, Monte Carlo, optimization, and the Prop Firm
-Evaluation module remain explicitly out of scope until their prerequisites are
-correct and tested.
+Strategy APIs, market state, execution simulation, portfolio accounting,
+experiments, and analytics begin only after the replay foundation is accepted.
+Options, Rust migrations, AI assistance, Monte Carlo, optimization, and the Prop
+Firm Evaluation module remain explicitly out of scope until their prerequisites
+are correct and tested.

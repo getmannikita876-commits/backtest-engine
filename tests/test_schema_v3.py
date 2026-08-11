@@ -315,3 +315,80 @@ def test_the_import_pipeline_still_accepts_a_version_two_batch() -> None:
     rejected = ImportBatch(record_type=ImportRecordType.TRADE, rows=(), schema_version=999)
     _, bad_report = validate_import_batch(rejected)
     assert any(issue.code.value == "unsupported_schema_version" for issue in bad_report.issues)
+
+
+# --------------------------------------------------------------------------
+# A version-3 read opens the file exactly once
+#
+# Found while building Phase 3's replay preflight, which resolves a manifest
+# through *any* byte-identical copy the catalog knows of, and therefore needs
+# every per-copy failure to be a typed storage error it can attribute to that
+# copy and move on from.
+#
+# ``_read_v3`` validated the schema and declared identity from one
+# ``read_table`` and then re-opened the file to fetch the rows — and that second
+# call was the one ``pq.read_table`` in the module with no wrapping. Two
+# consequences: the rows were not provably the rows whose identity had just been
+# validated, and a file replaced between the two reads produced a raw
+# ``pyarrow.lib.ArrowInvalid: Parquet magic bytes not found in footer`` instead
+# of a ``StorageContractError``, contradicting the module's stated contract that
+# it never leaks raw Arrow or Parquet errors.
+# --------------------------------------------------------------------------
+
+
+def test_a_version_three_read_opens_the_file_exactly_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Structural regression: one read means there is no window to race.
+
+    Counts reads rather than asserting on an error message, because the property
+    that closes the hole is that the second read no longer exists.
+    """
+    path = tmp_path / "once.parquet"
+    write_trades_v3(path, three_trades(), contract=ES_M2026)
+
+    # ``parquet_store`` does ``import pyarrow.parquet as pq``, so this module's
+    # own ``pq`` is the same module object: patching it here patches it there.
+    reads: list[Path] = []
+    real_read_table = pq.read_table
+
+    def counting_read_table(source: Path, *args: Any, **kwargs: Any) -> pa.Table:
+        reads.append(source)
+        return real_read_table(source, *args, **kwargs)
+
+    monkeypatch.setattr(pq, "read_table", counting_read_table)
+    dataset = read_records_v3(path)
+
+    assert len(dataset.records) == 3
+    assert reads == [path]
+
+
+def test_no_raw_arrow_error_escapes_a_version_three_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Whatever the file does, a caller sees ``StorageContractError``.
+
+    The failure is injected at ``read_table`` rather than by corrupting bytes,
+    because the case being pinned is the *second* read failing after the first
+    succeeded. That is unreachable now, which is precisely what the first
+    assertion states.
+    """
+    path = tmp_path / "flaky.parquet"
+    write_trades_v3(path, three_trades(), contract=ES_M2026)
+
+    calls = {"n": 0}
+    real_read_table = pq.read_table
+
+    def flaky_read_table(source: Path, *args: Any, **kwargs: Any) -> pa.Table:
+        calls["n"] += 1
+        if calls["n"] >= 2:
+            raise pa.ArrowInvalid("Parquet magic bytes not found in footer")
+        return real_read_table(source, *args, **kwargs)
+
+    monkeypatch.setattr(pq, "read_table", flaky_read_table)
+
+    assert len(read_records_v3(path).records) == 3
+
+    calls["n"] = 1
+    with pytest.raises(StorageContractError):
+        read_records_v3(path)
