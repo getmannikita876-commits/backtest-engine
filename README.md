@@ -13,7 +13,7 @@ correct.
 | Area | State |
 | --- | --- |
 | Immutable domain models (`Trade`, `Quote`, `Bar`, `TradeSide`) | implemented |
-| Storage contracts, fixed-point encoding, schema v2 | implemented |
+| Storage contracts, fixed-point encoding, schema v2 and v3 | implemented |
 | **Parquet read/write round-trip** | implemented |
 | Import validation, normalization, ordering | implemented |
 | End-to-end import use case (provider → validated Parquet, verified by read-back) | implemented |
@@ -21,7 +21,10 @@ correct.
 | Databento archived delimited export decoding | implemented |
 | ThetaData archived export decoding | **experimental, unverified** |
 | Futures contract identity in the **domain** (`FuturesContractId`) | implemented |
-| Futures contract identity in **storage** | **not implemented** — needs schema v3 |
+| Futures contract identity in **storage** (schema v3) | implemented |
+| Dataset manifests, provenance, and artifact catalog | implemented |
+| Explicit v2→v3 migration (never inferred) | implemented |
+| Importer writing schema v3 | **not implemented** — needs a declared contract per dataset |
 | Exchange-calendar engine (definitions → materialized UTC windows → resolver) | implemented |
 | CME equity-index (ES/NQ) calendar facts | **verified for trading dates 2023-05-22 … 2023-12-29 only** |
 | Futures rollover mapping (instant → listed contract) | implemented |
@@ -47,10 +50,13 @@ delivery month, and a **full four-digit year**, canonically `CME:ES:M2026`. See
 - Identity excludes specification (tick size, multiplier, currency, fees,
   expiry dates) and provenance. Neither is modelled.
 
-**Storage still persists only the legacy symbol string.** Schema v2 has one
-`utf8` `instrument_symbol` column, which carries no venue and no full year, so
-canonical identity cannot be reconstructed from a stored file without guessing.
-`SCHEMA_VERSION` remains 2 and existing files are unchanged in meaning.
+**Schema v3 persists canonical identity; schema v2 never did.** A v2 file has one
+`utf8` `instrument_symbol` column carrying no venue and no full year, so
+canonical identity cannot be reconstructed from it without guessing. Schema v3
+replaces that column with `canonical_identity` plus `vendor_symbol` and records
+identity in the schema metadata too. `SCHEMA_VERSION` is 3; every v2 file is
+still written and read exactly as before, and moving one to v3 requires an
+operator-supplied alias→contract mapping. See "Dataset identity" below.
 
 ## Exchange calendar
 
@@ -118,21 +124,67 @@ RollResolver.active_contract_at(utc) -> FuturesContractId
 
 **No roll data ships.** Every schedule and lifecycle fact is caller-supplied.
 
+## Dataset identity, provenance, and the catalog
+
+Answers *exactly which immutable canonical market-data dataset artifact is
+this?* — without a filename, a path, a provider's state, a clock, or any
+inference from a vendor alias. See
+`docs/adr/ADR-012-dataset-artifact-identity-and-schema-v3.md`.
+
+| Identity | Answers | Changes when |
+| --- | --- | --- |
+| `SemanticDatasetHash` | *what does this data mean?* | a record, or the row order, changes |
+| `PhysicalArtifactHash` | *which exact bytes?* | the file is re-encoded, corrupted, or replaced |
+| `ManifestHash` | *which claims and provenance?* | any claim or provenance field changes |
+
+- **The three are never collapsed.** That is what lets verification report a
+  re-encode as `PHYSICAL_MISMATCH` and an *edited* dataset as
+  `SEMANTIC_MISMATCH`. The clearest demonstration ships as a test: migrating one
+  file twice with mappings differing only in an **unused** entry yields the same
+  semantic hash, the same physical hash, and a different manifest hash.
+- **The semantic hash is computed from decoded domain records**, not stored
+  columns — `parse_trade_side` normalises, so a file holding `"BUY"` and one
+  holding `"buy"` are the same dataset. It excludes vendor alias, provider, path,
+  codec, row-group layout, wall clock, randomness, and `schema_version` itself.
+- **Order is semantic; sorting is forbidden.** Duplicates survive exactly
+  (ADR-003). The order pinned is the artifact's *stored* order, which is **not**
+  the future replay total order.
+- **Location is never identity.** `DatasetManifest` has no path field at all, so
+  relocation cannot change a hash by construction rather than by policy. The
+  index maps bytes to paths — never manifests to paths — so a manifest resolves
+  through *any* surviving byte-identical copy, and the index can be deleted and
+  rebuilt without losing a registration.
+- **Nothing is trusted.** Registration recomputes every claim — schema version,
+  record type, contract, row count, time bounds, vendor aliases, both hashes —
+  from the artifact. There is no partial registration.
+- **One dataset may have many artifacts.** Identical records from two vendors
+  share a semantic hash while differing physically and in provenance, so lookup
+  returns a deterministic tuple and never silently drops an alternative.
+- **Migration is explicit or it does not happen.** Alias → exact contract,
+  supplied by the caller; no symbol parsing, no current-year default, no
+  month-cycle arithmetic. The v2 input is never modified.
+
+**Durability is not claimed.** `os.replace` gives visibility atomicity only; no
+`fsync` is called, and directory `fsync` has no Windows equivalent — so the
+recovery story is detection, which is what the physical hash is for.
+
 ## What is not implemented
 
 Replay, execution, strategies, portfolio, options, Monte Carlo, prop-firm
-evaluation, DuckDB, dataset partitioning or catalogue, provider registry, live
-or historical vendor APIs, credential handling, and experiment tracking.
+evaluation, DuckDB, SQL or remote catalogs, dataset partitioning, provider
+registry, live or historical vendor APIs, credential handling, and experiment
+tracking. Revision/supersedes graphs and late-arriving corrections are also out
+of scope: the catalog describes artifacts, it does not model their history.
 
 Also not implemented: research session segmentation (RTH/ETH labels over the
 calendar), instrument→calendar mapping, calendar facts outside the verified
 2023 range, continuous **price** construction and back-adjustment,
 volume/open-interest roll rules, instrument specifications, any vendor
-symbol-to-identity alias registry, and persistence of canonical instrument
-identity or of roll schedules.
+symbol-to-identity alias registry, and persistence of roll schedules.
 
-Storage writes and reads single-record-type Parquet files by path. There is no
-catalogue, no partitioning, and no performance claim.
+Storage writes and reads single-record-type Parquet files by path. The catalog
+sits above it and registers those files by content; there is no partitioning and
+no performance claim.
 
 ## Requirements
 

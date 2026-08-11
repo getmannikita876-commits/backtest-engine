@@ -116,7 +116,9 @@ so an unrecognised code can never silently become `unknown`.
 The storage package exposes an explicit schema contract:
 
 - `SCHEMA_NAME = quant_research_terminal.storage`
-- `SCHEMA_VERSION = 2`
+- `SCHEMA_VERSION = 3`
+- `LEGACY_SCHEMA_VERSION = 2`
+- `SUPPORTED_SCHEMA_VERSIONS = {2, 3}`
 
 ### Version history
 
@@ -124,11 +126,12 @@ The storage package exposes an explicit schema contract:
 | --- | --- |
 | 1 | Initial trade, quote, and bar contracts |
 | 2 | Bars gained `interval_microseconds`; the trade `side` column was constrained to the `TradeSide` vocabulary |
+| 3 | `instrument_symbol` replaced by `canonical_identity` + `vendor_symbol`; `record_type` and `canonical_identity` added to schema metadata (ADR-012) |
 
-**Version 2 note (ADR-009), no bump: canonical futures identity is _not_
-persisted.** Phase 2.0 introduced `FuturesContractId` in the domain — a venue,
-a product root, a delivery month, and a full four-digit year, canonically
-`CME:ES:M2026`. **Storage does not carry it.** All three schemas store a single
+**Version 2 (ADR-009): canonical futures identity is _not_ persisted.**
+Phase 2.0 introduced `FuturesContractId` in the domain — a venue, a product
+root, a delivery month, and a full four-digit year, canonically `CME:ES:M2026`.
+**Version-2 storage does not carry it.** All three v2 schemas store a single
 `instrument_symbol` column of type `utf8`, and that column cannot represent
 canonical identity:
 
@@ -145,16 +148,47 @@ from June 2016. Nothing in the file decides between them.
 
 An automatic upgrade would therefore have to invent a venue and guess a decade,
 silently giving a file written yesterday a different meaning today — which the
-backward-compatibility policy forbids outright. So `SCHEMA_VERSION` remains 2,
-every column name, type, and metadata semantic is unchanged, and every existing
-version-2 file remains valid and means exactly what it did before.
+backward-compatibility policy forbids outright. So the legacy
+`instrument_symbol` string stays a **vendor alias**, not canonical identity, and
+must not be read as one.
 
-Full persistence of canonical identity requires a **schema v3** storing the
-components as separate columns (or a canonical string plus a venue), together
-with a migration that requires the operator to *declare* the venue and contract
-year per dataset rather than inferring either. That is a future decision with
-its own migration plan. Until then, the legacy `instrument_symbol` string is a
-**vendor alias**, not canonical identity, and must not be read as one.
+**Version 3 (ADR-012): canonical identity is persisted, and never inferred.**
+Version 3 replaces `instrument_symbol` with two columns answering two different
+questions:
+
+```
+timestamp | canonical_identity | vendor_symbol | <payload columns…>
+```
+
+`canonical_identity` is exactly `FuturesContractId.canonical()`. `vendor_symbol`
+preserves what the source called the instrument — provenance, never truth — and
+several aliases may legitimately map to one contract.
+
+Version-3 metadata is the six legacy keys with `schema_version=3`, plus
+`record_type` and `canonical_identity`, and the key set must match **exactly**.
+Version 2's tolerance of unknown extra keys is grandfathered, because files
+already exist under it.
+
+Identity lives in the metadata **as well as** the column, deliberately: an empty
+artifact is legal and has no rows to carry it. The reader cross-checks the two,
+so they cannot disagree silently — and it checks **every** row, not the first,
+because a single divergent row is exactly the corruption the column exposes. The
+metadata identity must also round-trip `parse(s).canonical() == s`, so a value
+like `"cme:es:m2026"` that every row matched is still refused rather than
+becoming a catalog key that cannot be read back.
+
+The honest limit: for an **empty** artifact the per-row check is vacuously true,
+so the metadata is the sole uncorroborated identity evidence. What detects
+tampering there is the dataset manifest, not the reader.
+
+**Version 3 is additive; version 2 is untouched.** New `write_*_v3`/`read_*_v3`
+take an explicit `FuturesContractId`. The v2 writers and readers are unchanged
+and still emit and accept version 2, because a v3 artifact needs a contract the
+import pipeline has no evidenced way to derive from an alias. `SCHEMA_VERSION`
+is 3, but `validate_storage_schema` defaults to **legacy** rather than current —
+defaulting to "whatever is newest" is how a v2 file would one day be validated
+as v3 — and the import pipeline is pinned to `LEGACY_SCHEMA_VERSION` /
+`SUPPORTED_SCHEMA_VERSIONS`, so import acceptance is provably unchanged.
 
 **Version 2 note (ADR-010), no bump: exchange calendars do not touch storage.**
 Phase 2.1 added the exchange-calendar subsystem entirely outside the storage
@@ -174,6 +208,12 @@ A roll schedule is pinned by its content hash, which a future run manifest can
 record alongside the calendar's three-string pin without reinterpreting
 anything. Roll schedules have **no persisted artifact format** in this phase;
 persistence belongs to the dataset-catalog work.
+
+**Version 3 note (ADR-012): a raw dataset pins no calendar and no roll
+schedule.** A `DatasetManifest` has no field that could carry either, and a test
+asserts it. Trades and quotes do not depend on calendar materialization, and
+bars keep ADR-002's interval and availability semantics untouched. A pin would
+only be justified if a dataset *transformation* had consumed one, and none does.
 
 **Version 2 clarification (ADR-004), no bump.** The canonical numeric envelope
 narrows what the *domain* accepts; it does not change what storage writes or how
@@ -201,6 +241,27 @@ the file rather than to individual record types.
 - Schema metadata is stored with every Arrow schema.
 - Versioning is independent of the package version.
 
+### Migration impact for version 3
+
+Version-2 data is **migrated only on explicit instruction**, never automatically.
+`catalog.migrate_v2_to_v3` requires the caller to supply a mapping from vendor
+alias to exact `FuturesContractId`; every alias in the file must resolve, and an
+unmapped one is `UnsupportedMigrationError`. There is no fallback that parses a
+symbol, no current-year default, and no month-cycle arithmetic anywhere in the
+module — that inference is the thing schema v3 exists to make impossible.
+
+- Several aliases mapping to **one** contract is the ordinary case and is fine.
+- A source spanning **two** contracts cannot become one single-instrument
+  artifact and is refused rather than silently split.
+- Unused mapping entries are refused by default (`allow_unused=True` accepts them
+  deliberately), because an unused entry is usually a typo whose real symbol then
+  trips the unmapped check and produces a confusing second-order error.
+- Migration writes a **new** artifact; the v2 input is opened read-only, and a
+  destination resolving to the source is refused. Bytes are not preserved and
+  cannot be — reading normalises where storage was lenient, so a source storing
+  `"BUY"` produces a v3 file holding `"buy"` — so the honest link back is the
+  source artifact's physical hash recorded in provenance.
+
 Schema metadata fields include:
 
 - `schema_name`
@@ -209,6 +270,11 @@ Schema metadata fields include:
 - `price_encoding`
 - `price_precision`
 - `price_scale`
+
+Version 3 adds, and requires exactly:
+
+- `record_type` — `trade`, `quote`, or `bar`
+- `canonical_identity` — e.g. `CME:ES:M2026`
 
 ## Parquet persistence (implemented)
 
@@ -222,10 +288,20 @@ domain records -> Arrow table -> Parquet file -> Arrow table -> domain records
 
 | Function | Purpose |
 | --- | --- |
-| `write_trades` / `read_trades` | Trade files |
-| `write_quotes` / `read_quotes` | Quote files |
-| `write_bars` / `read_bars` | Bar files |
+| `write_trades` / `read_trades` | Version-2 trade files |
+| `write_quotes` / `read_quotes` | Version-2 quote files |
+| `write_bars` / `read_bars` | Version-2 bar files |
+| `write_trades_v3` / `read_trades_v3` | Version-3 trade files, naming an explicit contract |
+| `write_quotes_v3` / `read_quotes_v3` | Version-3 quote files |
+| `write_bars_v3` / `read_bars_v3` | Version-3 bar files |
+| `read_dataset_descriptor` | A version-3 file's record type and contract, without reading rows |
+| `read_records_v3` | A version-3 file of whichever record type it declares |
 | `read_schema_metadata` | Inspect a file's contract without reconstructing records |
+
+The v3 readers return a `DatasetV3` carrying the **declared record type**, the
+contract, and the records in file order. The record type is returned rather than
+discarded because an empty artifact has no rows to contradict a false claim
+about it, so the declared type is the only evidence such a file contains.
 
 ### One record type per file
 
@@ -369,14 +445,45 @@ Reconstruction goes through the ordinary domain constructors, so every stored
 value is revalidated. Nothing uses `model_construct` or any other route that
 would bypass validation: a file is untrusted input.
 
+### Dataset identity and the catalog
+
+A stored artifact's identity is not a filename or a path. See ADR-012 and
+`quant_research_terminal.catalog`:
+
+| Identity | Answers | Changes when |
+| --- | --- | --- |
+| `SemanticDatasetHash` | *what does this data mean?* | a record, or the row order, changes |
+| `PhysicalArtifactHash` | *which exact bytes?* | the file is re-encoded, corrupted, or replaced |
+| `ManifestHash` | *which claims and provenance?* | any claim or provenance field changes |
+
+The semantic hash is a framed, single-pass SHA-256 over **decoded domain
+records** — not stored column values, because `parse_trade_side` normalises, so
+a file holding `"BUY"` and one holding `"buy"` are the same dataset. It excludes
+vendor alias, provider, path, compression, row-group layout, writer version,
+wall clock, randomness, and `schema_version` itself: a future v4 re-encoding of
+the same records yields the same semantic hash, which is the right answer to
+"did the data change?".
+
+It is a **sequence** hash. Same records in a different order give a different
+result, the hasher never sorts, and duplicates survive exactly (ADR-003). The
+order it pins is the artifact's **stored** order, which is *not* the future
+replay total order — `source_index` is not persisted, so nothing in a stored
+artifact proves its order came from `event_ordering_key`.
+
 ### Not implemented
 
-No DuckDB, no dataset catalogue, no partitioning strategy, no caching, no query
-layer, and no performance claim of any kind.
+No DuckDB, no SQL or remote catalog, no partitioning strategy, no caching, no
+query layer, and no performance claim of any kind. Durability is **not** claimed:
+`os.replace` gives visibility atomicity only, no `fsync` is called on the file or
+its directory, and directory `fsync` has no Windows equivalent — so recovery is
+detection, which is what the physical hash is for.
 
 ## Compatibility policy
 
-- Only schema versions that exactly match the current contract are accepted.
-- Unknown or incompatible schema metadata is rejected.
+- A file is validated against an **explicitly stated** expected version;
+  `validate_storage_schema` defaults to legacy rather than current, so a v2 file
+  is never silently validated as v3.
+- Unknown or incompatible schema metadata is rejected. Version 3 requires an
+  exact metadata key set; version 2's tolerance of extra keys is grandfathered.
 - Storage conversion is explicit and does not rely on generic model serialization.
 - Domain models remain authoritative; storage contracts preserve the exact domain types, semantics, and validation rules.

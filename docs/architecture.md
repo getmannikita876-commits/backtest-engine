@@ -11,6 +11,7 @@ Dependencies point inward, and never the other way:
 ```
 UI -> Application -> Data Import -> Storage -> Domain
                                    Calendars -> Domain
+                          Catalog -> Storage -> Domain
 ```
 
 `calendars/` is a data package beside the pipeline: it ships versioned
@@ -33,8 +34,12 @@ domain, and nothing in the domain depends back on it.
   fixed-point decimal encoding, and reads and writes single-record-type Parquet
   files (`parquet_store.py`). Writes are atomic; reconstruction goes through the
   ordinary domain constructors, so a file is treated as untrusted input. There
-  is no catalogue, partitioning, query layer, or DuckDB. See
-  `docs/data-contracts.md`.
+  is no partitioning, query layer, or DuckDB. See `docs/data-contracts.md`.
+- **Catalog** (`catalog/`) — dataset manifests, provenance, explicit v2→v3
+  migration, registration, and a rebuildable location index (ADR-012). It sits
+  *above* storage and the domain and is imported by neither. It composes the
+  domain's identity types with the storage layer's files; it owns no market-data
+  semantics of its own. See below and `docs/data-contracts.md`.
 - **Data Import** (`data_import/`) — providers, validation, normalization, and
   the orchestration that sequences them. See `docs/data-import.md`.
 - **Application** (`application/`) — use cases that orchestrate the layers
@@ -113,8 +118,10 @@ user-supplied file without guessing or repairing anything.
 Bars carry both temporal coordinates — `interval_start` and `interval` — and
 derive availability time from them, so a completed bar cannot be observed
 before its interval closes. See `docs/adr/ADR-002-bar-availability-time.md`.
-Storage is at `SCHEMA_VERSION = 2`; version-1 data is rejected rather than
-migrated, because a version-1 bar records no interval.
+Storage is at `SCHEMA_VERSION = 3`, with `LEGACY_SCHEMA_VERSION = 2` still
+written and read unchanged. Version-1 data is rejected rather than migrated,
+because a version-1 bar records no interval; version-2 data is migrated only on
+an explicit, operator-supplied alias→contract mapping.
 
 ## Futures instrument identity
 
@@ -162,13 +169,13 @@ Properties, all tested rather than asserted in prose:
   precision. Using one token per market consistently is currently the
   operator's responsibility.
 
-**Storage does not persist canonical identity.** Schema v2 stores one `utf8`
+**Schema v2 does not persist canonical identity.** It stores one `utf8`
 `instrument_symbol` column, and `"ESM6"` carries no venue and no full year, so
-canonical identity cannot be reconstructed from a stored file without guessing.
-`SCHEMA_VERSION` is unchanged at 2; domain events and Parquet still carry the
-legacy string. Full persistence requires a future schema v3 with an explicit
-migration. Not implemented, and not claimed: continuous futures, rollover,
-back-adjustment, exchange calendars, and instrument specifications.
+canonical identity cannot be reconstructed from a v2 file without guessing.
+**Schema v3 does** (ADR-012): it replaces that column with `canonical_identity`
+plus `vendor_symbol`, and records identity in the schema metadata too, because an
+empty artifact has no rows to carry it. The upgrade path is an explicit
+alias→contract mapping supplied by the operator, never an inference.
 
 ## Exchange calendar
 
@@ -247,11 +254,58 @@ RollResolver                               pure bisect lookups
   calendar and with lifecycle facts is checked in the materializers, so a
   directly constructed schedule carries the structural guarantees only.
 
+## Dataset identity and the catalog
+
+The catalog (ADR-012) answers *exactly which immutable canonical market-data
+dataset artifact is this?* — without a filename, a path, a provider's state, a
+clock, or any inference from a vendor alias.
+
+```
+domain/dataset_identity.py   RecordType + the three hash value objects + the
+      ▲                      framed semantic encoding (pure; no IO)
+data/  v3 schemas · v3 read/write · physical byte hashing
+      ▲
+catalog/  manifest · provenance · migration · registration · rebuildable index
+```
+
+- **Three identities, never collapsed.** `SemanticDatasetHash` (the data),
+  `PhysicalArtifactHash` (the bytes), `ManifestHash` (the claims and
+  provenance). Keeping them apart is what lets verification distinguish a
+  harmless re-encode from an edited dataset; collapsing any pair would make the
+  distinction unavailable.
+- **Identity is content-addressed.** No UUID, no randomness, no wall clock
+  anywhere in an immutable identity, enforced by the architecture sweep rather
+  than by convention. Registering the same artifact twice yields the same
+  identity.
+- **Location is not identity.** `DatasetManifest` has **no path field at all**,
+  so relocation cannot change identity by construction rather than by policy.
+  Paths live only in the rebuildable index.
+- **Nothing is trusted.** Registration recomputes schema version, record type,
+  contract, row count, time bounds, vendor aliases, and both hashes from the
+  artifact. There is no partial registration.
+- **One semantic hash, many manifests.** Identical records from different
+  vendors or under different Parquet encodings share semantic identity while
+  differing physically and in provenance, so lookup returns a deterministic
+  tuple and never silently drops an alternative.
+- **The index is not authority, and stores only what the manifests do not.**
+  Resolution is two hops: `ManifestHash → PhysicalArtifactHash` from the
+  immutable manifest, then `PhysicalArtifactHash → locations` from the index. A
+  manifest is never bound to a path, so `rebuild_index` is total — it hashes
+  candidate artifacts and records where the bytes are, and several manifests
+  pinning one physical hash all resolve through any surviving copy. Lookup by
+  semantic hash reads the published manifests, so it works with no index at all.
+
 ## Research invariants
 
 Market timestamps, exchange calendars, dataset provenance, configuration
 snapshots, and random seeds must remain explicit before replay or backtesting is
 implemented.
+
+A future `RunManifest` can pin its inputs with each dataset's
+`SemanticDatasetHash` (the strongest research-data pin) and `ManifestHash` (which
+adds provenance), plus — separately, and only where relevant — a calendar content
+hash (ADR-010) and a roll-schedule content hash (ADR-011). All four are exposed
+today; none of that orchestration is implemented.
 
 The UI must never become the source of research truth: experiments will
 eventually be represented by serializable configurations and immutable result

@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import datetime
 from decimal import Decimal
-from typing import Annotated
+from typing import Annotated, Any, Self
 
 from pydantic import (
     AfterValidator,
@@ -72,6 +73,47 @@ class _BaseDomainModel(BaseModel):
     """
 
     model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
+
+
+class CanonicalModel(_BaseDomainModel):
+    """A frozen model whose every instance is guaranteed already canonical.
+
+    The base exists for one reason: :meth:`~pydantic.BaseModel.model_copy`
+    **skips validation**, and for an identity type that is not a convenience,
+    it is a hole. Reproduced before this override existed::
+
+        forged = identity.model_copy(update={"contract_year": 6})
+        forged.canonical()                  # 'CME:ES:M0006'
+        FuturesContractId.parse(_)          # ValidationError
+
+    That is a serializer emitting a string its own parser rejects — a
+    catalogue key written today that cannot be read back tomorrow — reached
+    through an ordinary-looking public method whose documentation gives no hint
+    that validation is skipped. ``update={"contract_year": True}`` produced year
+    1 the same way, and an unrelated key such as ``tick_size`` was accepted into
+    the model despite ``extra="forbid"``.
+
+    Re-validating the copy closes it. The cost is one extra validation pass on
+    a method that is not on any hot path.
+
+    What is deliberately **not** defended against, so the guarantee is not
+    overstated: :meth:`~pydantic.BaseModel.model_construct` and
+    ``object.__setattr__``. Both are explicit, documented bypasses that announce
+    themselves at the call site — the equivalent of casting away a const — and
+    a type that tried to block them would be fighting the language rather than
+    protecting a caller from an easy mistake.
+
+    Lives here rather than in ``futures_contract`` — where it was introduced by
+    ADR-009 — because it is now the base for identity types in several packages,
+    and reaching across packages for a leading-underscore name would make every
+    such import a private-API import. ``futures_contract._CanonicalModel``
+    remains as an alias so nothing that already used it had to change.
+    """
+
+    def model_copy(self, *, update: Mapping[str, Any] | None = None, deep: bool = False) -> Self:
+        """Return a validated copy, unlike the unvalidated Pydantic default."""
+        copied = super().model_copy(update=update, deep=deep)
+        return type(self).model_validate(dict(copied.__dict__))
 
 
 class _UtcTimestampModel(_BaseDomainModel):

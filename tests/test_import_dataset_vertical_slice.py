@@ -587,10 +587,14 @@ def test_storage_v2_persists_only_the_legacy_vendor_symbol(tmp_path: Path) -> No
 
 
 def test_schema_version_is_unchanged_by_the_identity_phase(tmp_path: Path) -> None:
-    from quant_research_terminal.data.contracts import SCHEMA_VERSION
+    from quant_research_terminal.data.contracts import LEGACY_SCHEMA_VERSION
     from quant_research_terminal.data.parquet_store import read_schema_metadata
 
-    assert SCHEMA_VERSION == 2
+    # The import pipeline still writes version-2 artifacts: a version-3 file
+    # names a canonical contract, and the pipeline has no evidenced way to
+    # derive one from a vendor alias. The literal below is the point of the
+    # test — it must not follow a constant.
+    assert LEGACY_SCHEMA_VERSION == 2
 
     output = tmp_path / "esm6.parquet"
     _use_case().run(provider=_trade_provider(), request=_request(), output_path=output)

@@ -14,7 +14,6 @@ from quant_research_terminal.data import (
     QUOTE_ARROW_SCHEMA,
     QUOTE_POLARS_SCHEMA,
     SCHEMA_NAME,
-    SCHEMA_VERSION,
     TIMESTAMP_TIMEZONE,
     TRADE_ARROW_SCHEMA,
     TRADE_POLARS_SCHEMA,
@@ -46,7 +45,9 @@ def test_trade_arrow_schema_fields_and_types() -> None:
     assert TRADE_ARROW_SCHEMA.field("size").type == pa.uint64()
     assert TRADE_ARROW_SCHEMA.metadata is not None
     assert TRADE_ARROW_SCHEMA.metadata[b"schema_name"] == SCHEMA_NAME.encode("utf-8")
-    assert TRADE_ARROW_SCHEMA.metadata[b"schema_version"] == str(SCHEMA_VERSION).encode("utf-8")
+    # Literal, not the constant: this pins that the version-2 schema stays
+    # version 2 after the platform's current version moved on.
+    assert TRADE_ARROW_SCHEMA.metadata[b"schema_version"] == b"2"
     assert TRADE_ARROW_SCHEMA.metadata[b"timestamp_timezone"] == TIMESTAMP_TIMEZONE.encode("utf-8")
 
 

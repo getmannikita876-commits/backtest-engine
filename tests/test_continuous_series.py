@@ -357,9 +357,16 @@ def test_series_model_copy_revalidates(series: ContinuousSeriesDefinition) -> No
 
 
 def test_the_storage_schema_version_is_unchanged() -> None:
-    from quant_research_terminal.data.contracts import SCHEMA_VERSION
+    """Phase 2.2 added no persistence; Phase 2.3 later added version 3.
 
-    assert SCHEMA_VERSION == 2
+    The claim this test makes is about *version-2 artifacts*, so it asserts the
+    legacy constant. A literal is used for the current version so that a future
+    bump has to come here deliberately rather than being ratified silently.
+    """
+    from quant_research_terminal.data.contracts import LEGACY_SCHEMA_VERSION, SCHEMA_VERSION
+
+    assert LEGACY_SCHEMA_VERSION == 2
+    assert SCHEMA_VERSION == 3
 
 
 def test_no_roll_or_continuous_column_entered_the_storage_schemas() -> None:

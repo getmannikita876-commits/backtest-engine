@@ -3,19 +3,27 @@ from __future__ import annotations
 from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from typing import TypedDict
+from typing import Final, TypedDict
 
 import pyarrow as pa  # type: ignore[import-untyped]
 
 from quant_research_terminal.data.contracts import (
+    CANONICAL_IDENTITY_METADATA_KEY,
+    LEGACY_SCHEMA_VERSION,
     PRICE_ENCODING,
     PRICE_PRECISION,
     PRICE_QUANTUM,
     PRICE_SCALE,
+    RECORD_TYPE_METADATA_KEY,
     SCHEMA_NAME,
     SCHEMA_VERSION,
     TIMESTAMP_TIMEZONE,
     UINT64_MAX,
+)
+from quant_research_terminal.domain.dataset_identity import RecordType
+from quant_research_terminal.domain.futures_contract import (
+    FuturesContractId,
+    require_listed_contract,
 )
 from quant_research_terminal.domain.models import Bar, Quote, Trade, parse_trade_side
 from quant_research_terminal.domain.numeric import (
@@ -48,6 +56,37 @@ class QuoteStorageRow(TypedDict):
 class BarStorageRow(TypedDict):
     timestamp: datetime
     instrument_symbol: str
+    interval_microseconds: int
+    open: int
+    high: int
+    low: int
+    close: int
+    volume: int
+
+
+class TradeStorageRowV3(TypedDict):
+    timestamp: datetime
+    canonical_identity: str
+    vendor_symbol: str
+    price: int
+    size: int
+    side: str
+
+
+class QuoteStorageRowV3(TypedDict):
+    timestamp: datetime
+    canonical_identity: str
+    vendor_symbol: str
+    bid: int
+    ask: int
+    bid_size: int
+    ask_size: int
+
+
+class BarStorageRowV3(TypedDict):
+    timestamp: datetime
+    canonical_identity: str
+    vendor_symbol: str
     interval_microseconds: int
     open: int
     high: int
@@ -142,13 +181,28 @@ def _unsigned_int_to_decimal(value: object, field_name: str) -> Decimal:
     return Decimal(value)
 
 
-def validate_storage_schema(schema: pa.Schema) -> None:
+def validate_storage_schema(
+    schema: pa.Schema, *, expected_version: int = LEGACY_SCHEMA_VERSION
+) -> None:
+    """Check the six shared metadata keys against one schema version.
+
+    ``expected_version`` defaults to the **legacy** version rather than to
+    ``SCHEMA_VERSION``. That is deliberate: defaulting to "whatever the current
+    version happens to be" is exactly how a version-2 file would one day be
+    validated as version 3 the moment someone bumps the constant. Callers that
+    mean version 3 say so.
+
+    Unknown extra keys are tolerated here, as they always have been; version-3
+    artifacts get an exact key-set check in :func:`validate_storage_schema_v3`
+    instead, because files already exist under the lenient version-2 rule and
+    tightening it retroactively would reject them.
+    """
     metadata = schema.metadata
     if metadata is None:
         raise ValueError("schema metadata is required")
     if metadata.get(b"schema_name") != SCHEMA_NAME.encode("utf-8"):
         raise ValueError("schema name is incompatible")
-    if metadata.get(b"schema_version") != str(SCHEMA_VERSION).encode("utf-8"):
+    if metadata.get(b"schema_version") != str(expected_version).encode("utf-8"):
         raise ValueError("schema version is incompatible")
     if metadata.get(b"timestamp_timezone") != TIMESTAMP_TIMEZONE.encode("utf-8"):
         raise ValueError("schema timestamp timezone is incompatible")
@@ -158,6 +212,143 @@ def validate_storage_schema(schema: pa.Schema) -> None:
         raise ValueError("schema price precision is incompatible")
     if metadata.get(b"price_scale") != str(PRICE_SCALE).encode("utf-8"):
         raise ValueError("schema price scale is incompatible")
+
+
+#: The complete metadata key set a version-3 schema carries.
+_V3_METADATA_KEYS: Final[frozenset[bytes]] = frozenset(
+    {
+        b"schema_name",
+        b"schema_version",
+        b"timestamp_timezone",
+        b"price_encoding",
+        b"price_precision",
+        b"price_scale",
+        RECORD_TYPE_METADATA_KEY,
+        CANONICAL_IDENTITY_METADATA_KEY,
+    }
+)
+
+
+def validate_storage_schema_v3(schema: pa.Schema) -> tuple[RecordType, FuturesContractId]:
+    """Validate a version-3 schema and return what it says it holds.
+
+    Metadata-only: no row is touched, so a file naming the wrong contract costs
+    one footer read rather than a full scan.
+
+    The canonical identity must **round-trip** — ``parse(s).canonical() == s`` —
+    not merely parse. Without that, a metadata value of ``"cme:es:m2026"`` whose
+    every row matches would pass a naive equality check while being a string
+    the platform's own parser rejects: a catalogue key written today that
+    cannot be read back tomorrow, which is precisely the defect ADR-009's
+    re-validating ``model_copy`` exists to prevent.
+
+    Raises:
+        ValueError: for any metadata violation, described specifically.
+    """
+    metadata = schema.metadata
+    if metadata is None:
+        raise ValueError("schema metadata is required")
+
+    actual_keys = frozenset(metadata)
+    if actual_keys != _V3_METADATA_KEYS:
+        missing = sorted(key.decode("ascii", "replace") for key in _V3_METADATA_KEYS - actual_keys)
+        unexpected = sorted(
+            key.decode("ascii", "replace") for key in actual_keys - _V3_METADATA_KEYS
+        )
+        raise ValueError(
+            f"a version-3 schema carries exactly the documented metadata keys; "
+            f"missing {missing}, unexpected {unexpected}"
+        )
+
+    validate_storage_schema(schema, expected_version=SCHEMA_VERSION)
+
+    raw_type = metadata[RECORD_TYPE_METADATA_KEY]
+    try:
+        record_type = RecordType(raw_type.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError) as error:
+        raise ValueError(f"schema record type {raw_type!r} is not a known record type") from error
+
+    raw_identity = metadata[CANONICAL_IDENTITY_METADATA_KEY]
+    try:
+        identity = raw_identity.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise ValueError("schema canonical identity is not valid UTF-8") from error
+    contract = FuturesContractId.parse(identity)
+    if contract.canonical() != identity:
+        raise ValueError(
+            f"schema canonical identity {identity!r} is not in canonical form; it would "
+            f"serialize as {contract.canonical()!r}"
+        )
+    require_listed_contract(contract)
+    return record_type, contract
+
+
+#: ``vendor_symbol`` is the record's own ``instrument_symbol`` — the alias the
+#: source used — preserved verbatim. It is provenance and never determines the
+#: canonical identity, which the caller supplies once for the whole dataset.
+def trade_to_storage_row_v3(trade: Trade, contract: FuturesContractId) -> TradeStorageRowV3:
+    row = trade_to_storage_row(trade)
+    return {
+        "timestamp": row["timestamp"],
+        "canonical_identity": contract.canonical(),
+        "vendor_symbol": trade.instrument_symbol,
+        "price": row["price"],
+        "size": row["size"],
+        "side": row["side"],
+    }
+
+
+def quote_to_storage_row_v3(quote: Quote, contract: FuturesContractId) -> QuoteStorageRowV3:
+    row = quote_to_storage_row(quote)
+    return {
+        "timestamp": row["timestamp"],
+        "canonical_identity": contract.canonical(),
+        "vendor_symbol": quote.instrument_symbol,
+        "bid": row["bid"],
+        "ask": row["ask"],
+        "bid_size": row["bid_size"],
+        "ask_size": row["ask_size"],
+    }
+
+
+def bar_to_storage_row_v3(bar: Bar, contract: FuturesContractId) -> BarStorageRowV3:
+    row = bar_to_storage_row(bar)
+    return {
+        "timestamp": row["timestamp"],
+        "canonical_identity": contract.canonical(),
+        "vendor_symbol": bar.instrument_symbol,
+        "interval_microseconds": row["interval_microseconds"],
+        "open": row["open"],
+        "high": row["high"],
+        "low": row["low"],
+        "close": row["close"],
+        "volume": row["volume"],
+    }
+
+
+def _as_v2_row(row: Mapping[str, object]) -> dict[str, object]:
+    """Return a version-3 row shaped as the version-2 decoder expects.
+
+    The vendor symbol becomes ``instrument_symbol``, which is exactly what it
+    is: the alias the source used. The canonical identity is *not* placed on
+    the record — domain records carry no canonical identity (ADR-009), and the
+    dataset's contract is returned alongside the records instead.
+    """
+    converted = {key: value for key, value in row.items() if key != "canonical_identity"}
+    converted["instrument_symbol"] = converted.pop("vendor_symbol")
+    return converted
+
+
+def trade_from_storage_row_v3(row: Mapping[str, object]) -> Trade:
+    return trade_from_storage_row(_as_v2_row(row))
+
+
+def quote_from_storage_row_v3(row: Mapping[str, object]) -> Quote:
+    return quote_from_storage_row(_as_v2_row(row))
+
+
+def bar_from_storage_row_v3(row: Mapping[str, object]) -> Bar:
+    return bar_from_storage_row(_as_v2_row(row))
 
 
 def trade_to_storage_row(trade: Trade) -> TradeStorageRow:

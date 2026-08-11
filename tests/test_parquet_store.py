@@ -31,7 +31,6 @@ from quant_research_terminal.data import (
     MIN_TIMESTAMP_MICROSECONDS,
     PRICE_QUANTUM,
     SCHEMA_NAME,
-    SCHEMA_VERSION,
     TRADE_ARROW_SCHEMA,
     UINT64_MAX,
     StorageContractError,
@@ -334,7 +333,10 @@ def test_written_metadata_matches_the_contract(tmp_path: Path) -> None:
     metadata = read_schema_metadata(path)
 
     assert metadata["schema_name"] == SCHEMA_NAME
-    assert metadata["schema_version"] == str(SCHEMA_VERSION)
+    # A literal, deliberately: the point of this assertion is that the
+    # version-2 writer keeps emitting version 2. Comparing against the current
+    # constant would make the test pass no matter what the writer emitted.
+    assert metadata["schema_version"] == "2"
     assert metadata["timestamp_timezone"] == "UTC"
     assert metadata["price_encoding"] == "fixed_scale_decimal"
     assert metadata["price_scale"] == "6"

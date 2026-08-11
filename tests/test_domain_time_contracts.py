@@ -280,8 +280,11 @@ def test_stored_side_outside_the_vocabulary_is_rejected() -> None:
 # --------------------------------------------------------------------------
 
 
-def test_schema_version_is_two() -> None:
-    assert SCHEMA_VERSION == 2
+def test_legacy_schema_version_is_two_and_current_is_three() -> None:
+    from quant_research_terminal.data.contracts import LEGACY_SCHEMA_VERSION
+
+    assert LEGACY_SCHEMA_VERSION == 2
+    assert SCHEMA_VERSION == 3
 
 
 def test_bar_schema_metadata_declares_version_two() -> None:

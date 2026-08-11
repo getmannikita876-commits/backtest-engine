@@ -80,15 +80,28 @@ with provider.fetch(request) as records:
 
 ## Schema version is batch-fatal (approved)
 
-A batch whose `schema_version` does not match the storage contract produces
-**exactly one** `FATAL` `unsupported_schema_version` issue, and nothing else
-runs: no validator is invoked, no record is normalized, and no domain object is
-returned.
+A batch whose `schema_version` is not one this build supports produces **exactly
+one** `FATAL` `unsupported_schema_version` issue, and nothing else runs: no
+validator is invoked, no record is normalized, and no domain object is returned.
 
 The rows were written against a layout this build does not understand, so every
 field meaning is in doubt. Validating them would produce findings derived from
 an unknown layout, and normalizing them could manufacture domain objects from
 misinterpreted values.
+
+**The schema v3 bump did not change import acceptance.** `ImportBatch` defaults
+to `LEGACY_SCHEMA_VERSION` and the check tests membership in
+`SUPPORTED_SCHEMA_VERSIONS`, so a batch declaring 2 is still accepted and 999 is
+still rejected — pinned by a regression test. Reading the current constant here
+would have silently made every existing caller's batch version unsupported the
+moment storage moved to 3.
+
+**The importer still writes version 2**, deliberately. A v3 artifact must name a
+listed `FuturesContractId`, and the import pipeline has no evidenced way to
+derive one from a vendor alias — deriving it would be exactly the inference
+ADR-012 exists to make impossible. v3 artifacts therefore come from a direct v3
+write or from an explicit, operator-supplied migration. Wiring the importer needs
+a declared contract per dataset and is future work.
 
 ## Timestamp rules (approved)
 
