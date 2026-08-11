@@ -527,6 +527,47 @@ and a **different** `SemanticDatasetHash` — identical semantics is provider or
 encoding variation, not correction. Different semantics, conversely, proves
 nothing: no relation exists until one is explicitly published.
 
+### What replay reads, and what it refuses
+
+Deterministic replay (ADR-014) consumes these contracts read-only and adds no
+persisted field: `SCHEMA_VERSION` remains 3.
+
+The temporal contract it depends on, restated where a reader of this document
+will look for it:
+
+| Record | Availability time — when replay makes it observable |
+| --- | --- |
+| `Trade` | `Trade.timestamp` |
+| `Quote` | `Quote.timestamp` |
+| `Bar` | `Bar.timestamp`, the derived interval close (`interval_start + interval`) |
+
+For bars this is the ADR-002 property and replay never recomputes it — it reads
+`Bar.timestamp`, so there is one arithmetic and no opportunity to drift. For
+trades and quotes the equality holds because the schema persists **one**
+timestamp column and no second coordinate; it is a limitation of the contract and
+is deliberately *not* documented as a claim that feed latency is zero.
+
+Two storage properties are load-bearing for replay and are stated here as
+requirements on this contract rather than as replay's own behaviour:
+
+- **File order is the logical row order.** `read_records_v3` returns rows in file
+  order, the writers preserve caller order, and neither sorts. Replay derives
+  `row_ordinal` from that order and never renumbers it.
+- **Stored order is part of semantic identity.** The dataset hash is a sequence
+  hash and never sorts, so replay refuses an out-of-order source rather than
+  repairing it — sorting would produce a timeline whose semantics no published
+  `SemanticDatasetHash` describes.
+
+Replay refuses a **schema-v2** source outright. Version 2 persists a vendor alias
+rather than a listed contract, and resolving `"ESM6"` into `CME:ES:M2026` would
+mean guessing a venue and a decade. Migration is explicit and is never invoked
+automatically.
+
+An **empty** version-3 artifact is a valid replay source: it contributes zero
+events, is vacuously ordered, and still participates in the duplicate-dataset
+check. Its identity lives in the schema metadata, which is why an empty artifact
+is meaningful at all.
+
 ### Not implemented
 
 No DuckDB, no SQL or graph database, no partitioning strategy, no caching, no

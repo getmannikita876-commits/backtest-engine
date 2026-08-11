@@ -68,6 +68,7 @@ from collections.abc import Callable, Iterable, Mapping
 from datetime import datetime, timedelta
 from decimal import Decimal
 from enum import StrEnum, unique
+from types import MappingProxyType
 from typing import Final, final
 
 from pydantic import field_validator
@@ -154,29 +155,37 @@ def require_record_type(value: object) -> RecordType:
 #: field moves every hash *even if the author forgets to bump*
 #: :data:`SEMANTIC_ENCODING_FORMAT`. That is a structural guarantee where the
 #: format token alone is only a human promise.
-SEMANTIC_FIELD_ORDER: Final[Mapping[RecordType, tuple[str, ...]]] = {
-    RecordType.TRADE: ("timestamp", "price", "size", "side"),
-    RecordType.QUOTE: ("timestamp", "bid", "ask", "bid_size", "ask_size"),
-    RecordType.BAR: (
-        "timestamp",
-        "interval_microseconds",
-        "open",
-        "high",
-        "low",
-        "close",
-        "volume",
-    ),
-}
+#:
+#: Read-only at runtime for the reason given on :data:`RECORD_PAYLOAD_TYPES` —
+#: mutating it would silently re-key every dataset in the catalog.
+SEMANTIC_FIELD_ORDER: Final[Mapping[RecordType, tuple[str, ...]]] = MappingProxyType(
+    {
+        RecordType.TRADE: ("timestamp", "price", "size", "side"),
+        RecordType.QUOTE: ("timestamp", "bid", "ask", "bid_size", "ask_size"),
+        RecordType.BAR: (
+            "timestamp",
+            "interval_microseconds",
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume",
+        ),
+    }
+)
 
 #: Stable one-byte codes for the trade-side vocabulary.
 #:
 #: A fixed width rather than a token, so the encoding cannot become ambiguous
 #: if the vocabulary ever grows a member that prefixes another.
-SIDE_CODE: Final[Mapping[TradeSide, int]] = {
-    TradeSide.BUY: 0,
-    TradeSide.SELL: 1,
-    TradeSide.UNKNOWN: 2,
-}
+#: Read-only: these codes are hashed directly into every trade dataset.
+SIDE_CODE: Final[Mapping[TradeSide, int]] = MappingProxyType(
+    {
+        TradeSide.BUY: 0,
+        TradeSide.SELL: 1,
+        TradeSide.UNKNOWN: 2,
+    }
+)
 
 
 class DatasetIdentityError(Exception):
@@ -357,11 +366,32 @@ _ENCODERS: Final[Mapping[RecordType, Callable[..., bytes]]] = {
     RecordType.BAR: _encode_bar,
 }
 
-_EXPECTED_TYPES: Final[Mapping[RecordType, type]] = {
-    RecordType.TRADE: Trade,
-    RecordType.QUOTE: Quote,
-    RecordType.BAR: Bar,
-}
+#: The domain record class each record type's artifacts hold.
+#:
+#: Public so that anything else asking "which class is a trade?" reads the one
+#: mapping the canonical semantic encoding itself uses. A second copy elsewhere
+#: would be a second answer, and the two would drift the first time a record
+#: type was added — silently, because both copies would still be internally
+#: consistent.
+#:
+#: Wrapped in a :class:`~types.MappingProxyType` because ``Final[Mapping[...]]``
+#: binds a type checker and nothing else — the same gap ``require_digest`` and
+#: ``require_record_type`` exist to close at runtime. This table decides which
+#: encoder the dataset hash uses *and* which payload class a replay event will
+#: accept, so one assignment into a plain ``dict`` would corrupt canonical
+#: dataset identity and replay's payload discriminator at once. A public name is
+#: reachable; a public mutable identity table is a hole.
+RECORD_PAYLOAD_TYPES: Final[Mapping[RecordType, type[Trade] | type[Quote] | type[Bar]]] = (
+    MappingProxyType(
+        {
+            RecordType.TRADE: Trade,
+            RecordType.QUOTE: Quote,
+            RecordType.BAR: Bar,
+        }
+    )
+)
+
+_EXPECTED_TYPES: Final[Mapping[RecordType, type]] = RECORD_PAYLOAD_TYPES
 
 
 def schema_token(record_type: RecordType) -> str:

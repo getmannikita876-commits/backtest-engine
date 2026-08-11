@@ -601,7 +601,7 @@ def _read_v3(
             f"{path} holds {declared_contract.canonical()}, not the expected {contract.canonical()}"
         )
 
-    rows = _read_rows_for_schema(path, expected_schema)
+    rows = _rows_from_table(table, expected_schema, path)
 
     # Every row, not the first: a single divergent row is exactly the corruption
     # this column exists to expose, and an empty artifact makes the check
@@ -624,8 +624,26 @@ def _read_v3(
     )
 
 
-def _read_rows_for_schema(path: Path, expected: pa.Schema) -> list[dict[str, Any]]:
-    table = pq.read_table(path)
+def _rows_from_table(table: pa.Table, expected: pa.Schema, path: Path) -> list[dict[str, Any]]:
+    """Materialize storage rows from a table that has already been read.
+
+    Takes the table rather than the path, and that is the point. This previously
+    re-opened the file, which meant a version-3 read touched the same path twice:
+    once to validate the schema and identity, and again to fetch the rows. Two
+    consequences, one wasteful and one a genuine contract hole:
+
+    * the second read is redundant — the caller already holds the table;
+    * ``pq.read_table`` was called here **unwrapped**, so if the file changed
+      between the two reads a raw ``pyarrow.lib.ArrowInvalid`` escaped, despite
+      this module's stated contract that it never leaks raw Arrow or Parquet
+      errors. Reproduced before the change: a replaced file produced
+      ``pyarrow.lib.ArrowInvalid: Parquet magic bytes not found in footer``
+      rather than a :class:`StorageContractError`.
+
+    Reading once removes both. The rows are now provably the rows whose schema
+    and declared identity were validated, rather than the rows of whatever was at
+    that path a moment later.
+    """
     columns = {field.name: _column_values(table, field, path) for field in expected}
     return [
         {name: values[index] for name, values in columns.items()} for index in range(table.num_rows)

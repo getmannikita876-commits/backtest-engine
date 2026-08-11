@@ -347,6 +347,11 @@ _TIME_SENSITIVE_NAME_TOKENS = (
     "lifecycle",
     "continuous",
     "time",
+    # ``domain/replay.py`` owns the availability-time semantics the entire
+    # anti-look-ahead story rests on. A wall-clock read or an ambient-state
+    # dependency there would make a replay's own notion of "now" depend on when
+    # it was run, which is the failure this sweep exists to catch.
+    "replay",
     # ``domain/dataset_identity.py`` owns the canonical semantic encoding: the
     # one module whose entire purpose is producing the same bytes on every
     # machine, forever. It matched none of the subject tokens above, so without
@@ -820,3 +825,404 @@ def test_application_does_not_import_provider_implementations() -> None:
         and f"imports {PROVIDER_INTERFACE}." not in violation
     ]
     assert violations == []
+
+
+# --------------------------------------------------------------------------
+# Deterministic replay (Phase 3, ADR-014)
+#
+# Replay composes the domain's market records with the catalog's verified
+# artifacts. It sits above both and is imported by neither, and it must stay
+# free of every concern the phase deliberately excludes: market state, strategy
+# callbacks, execution, a mutable clock, seeking, and revision selection.
+# --------------------------------------------------------------------------
+
+REPLAY = f"{ROOT_MODULE}.replay"
+DOMAIN_REPLAY = f"{DOMAIN}.replay"
+
+REPLAY_MODULES = (
+    REPLAY,
+    f"{REPLAY}.errors",
+    f"{REPLAY}.prepare",
+    f"{REPLAY}.stream",
+)
+
+
+def _public_module_names(module: str) -> frozenset[str]:
+    """Return every public top-level name a module *defines*.
+
+    Broader than :func:`_public_api`, which sees only classes and functions.
+    A replay module's surface can also grow a module constant or a ``type``
+    alias, and either is just as reachable by a caller — a ``RECORD_PRIORITY``
+    table or a ``ReplayClock`` alias would sail past a class-and-function scan
+    while doing precisely the forbidden thing.
+    """
+    path = PACKAGE_ROOT / Path(*module.split(".")[1:])
+    path = path / "__init__.py" if path.is_dir() else path.with_suffix(".py")
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+
+    found: set[str] = set()
+    for node in tree.body:
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
+            found.add(node.name)
+        elif isinstance(node, ast.TypeAlias) and isinstance(node.name, ast.Name):
+            found.add(node.name.id)
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            found.add(node.target.id)
+        elif isinstance(node, ast.Assign):
+            found.update(target.id for target in node.targets if isinstance(target, ast.Name))
+    return frozenset(name for name in found if not name.startswith("_"))
+
+
+#: The complete public surface of every replay module.
+#:
+#: An **allowlist**, for the ADR-013 reason: a denylist of suspicious substrings
+#: only catches the names its author imagined. ``resume_from``, ``fast_forward``,
+#: ``EVENT_PRIORITY``, and ``wall_clock_pace`` would each pass a keyword filter
+#: while introducing exactly what Phase 3 refuses. Pinning the surface makes any
+#: new public name fail this test until somebody adds it here deliberately —
+#: which is the moment to ask whether it paces a clock, seeks, keeps market
+#: state, reconciles datasets, or invents a causal order.
+EXPECTED_REPLAY_API: dict[str, frozenset[str]] = {
+    DOMAIN_REPLAY: frozenset(
+        {
+            "ReplayConfig",
+            "ReplayEvent",
+            "ReplayFrame",
+            "ReplayPayload",
+            "ReplayRange",
+            "frame_event_sort_key",
+        }
+    ),
+    f"{REPLAY}.errors": frozenset(
+        {
+            "AmbiguousReplayOverlapError",
+            "DuplicateReplaySemanticDatasetError",
+            "NonMonotonicReplaySourceError",
+            "ReplayArtifactVerificationError",
+            "ReplayError",
+            "ReplayInvariantError",
+            "UnsupportedReplaySchemaError",
+        }
+    ),
+    f"{REPLAY}.prepare": frozenset({"PreparedReplay", "prepare_replay"}),
+    f"{REPLAY}.stream": frozenset(
+        {
+            "PreparedRow",
+            "PreparedSource",
+            "build_prepared_source",
+            "frame_timeline",
+            "validate_source_monotonicity",
+        }
+    ),
+}
+
+#: Concepts that must not appear in a replay name during this phase.
+#:
+#: The allowlist above is the real guard; this is the readable statement of
+#: *why* a new name would be refused, and it fails on the package's own
+#: ``__all__`` too, which is the surface a caller actually reaches for.
+FORBIDDEN_REPLAY_CONCEPTS = (
+    "clock",
+    "seek",
+    "checkpoint",
+    "restore",
+    "resume",
+    "rewind",
+    "jump",
+    "advance",
+    "sleep",
+    "pace",
+    "speed",
+    "tick",
+    "latest",
+    "current",
+    "newest",
+    "preferred",
+    "merge",
+    "reconcile",
+    "marketstate",
+    "strategy",
+    "callback",
+    "order",
+    "fill",
+    "portfolio",
+    "position",
+    "priority",
+)
+
+
+def test_the_replay_packages_are_actually_being_scanned() -> None:
+    names = {module for module, _ in _modules_under(ROOT_MODULE)}
+    for module in (*REPLAY_MODULES, DOMAIN_REPLAY):
+        assert module in names, f"{module} escaped the scan"
+
+
+def test_the_pure_replay_module_depends_on_nothing_above_the_domain() -> None:
+    _, imported = _modules_under(DOMAIN_REPLAY)[0]
+    outward = {
+        name
+        for name in imported
+        if name.startswith(f"{ROOT_MODULE}.") and not name.startswith(f"{DOMAIN}.")
+    }
+    assert outward == set(), f"domain.replay depends outward on {sorted(outward)}"
+
+
+def test_the_domain_does_not_import_the_replay_orchestration_package() -> None:
+    assert _violations(source_prefix=DOMAIN, forbidden_prefix=REPLAY) == []
+
+
+@pytest.mark.parametrize("layer", [STORAGE, DATA_IMPORT, CATALOG, APPLICATION, UI, CALENDARS])
+def test_no_layer_beneath_or_beside_replay_imports_it(layer: str) -> None:
+    assert _violations(source_prefix=layer, forbidden_prefix=REPLAY) == []
+
+
+def test_replay_does_not_import_ui_providers_import_or_application() -> None:
+    for forbidden in (UI, PROVIDERS, DATA_IMPORT, APPLICATION):
+        assert _violations(source_prefix=REPLAY, forbidden_prefix=forbidden) == []
+
+
+def test_replay_does_not_import_execution_strategy_or_portfolio() -> None:
+    """None of these exist. The assertion is that none appears later either."""
+    for absent in ("execution", "strategy", "portfolio", "backtest", "market_state", "research"):
+        assert _violations(source_prefix=REPLAY, forbidden_prefix=f"{ROOT_MODULE}.{absent}") == []
+
+
+def test_replay_does_not_import_lineage_navigation_or_comparison() -> None:
+    """Exact manifest pins are replayed as themselves; no successor is consulted.
+
+    Structural rather than a policy: the package cannot follow a supersedes edge
+    it never imports, and cannot reconcile two datasets with a comparison it
+    never reaches for.
+    """
+    for forbidden in (f"{CATALOG}.lineage", f"{CATALOG}.comparison"):
+        assert _violations(source_prefix=REPLAY, forbidden_prefix=forbidden) == []
+        assert _violations(source_prefix=DOMAIN_REPLAY, forbidden_prefix=forbidden) == []
+    assert _violations(source_prefix=REPLAY, forbidden_prefix=f"{DOMAIN}.dataset_lineage") == []
+
+
+def test_replay_does_not_require_a_calendar_or_a_roll_schedule() -> None:
+    """Base market-data replay derives no trading date and switches no contract."""
+    for forbidden in (
+        CALENDARS,
+        f"{DOMAIN}.exchange_calendar",
+        f"{DOMAIN}.calendar_definition",
+        f"{DOMAIN}.calendar_materialization",
+        f"{DOMAIN}.rollover",
+        f"{DOMAIN}.rollover_definition",
+        f"{DOMAIN}.rollover_materialization",
+        f"{DOMAIN}.continuous_series",
+        f"{DOMAIN}.contract_lifecycle",
+    ):
+        assert _violations(source_prefix=REPLAY, forbidden_prefix=forbidden) == []
+        assert _violations(source_prefix=DOMAIN_REPLAY, forbidden_prefix=forbidden) == []
+
+
+def test_the_pure_replay_module_is_covered_by_the_determinism_sweep() -> None:
+    """Canary: availability-time semantics must not acquire a clock.
+
+    ``domain/replay.py`` matched none of the original subject tokens, which is
+    the same blind spot ADR-010's D9 opened and ADR-012 re-opened in another
+    package. ``replay`` was added to the token list; this keeps it there.
+    """
+    names = {module for module, _ in _calendar_modules()}
+    assert DOMAIN_REPLAY in names
+
+
+#: Machinery whose whole purpose is ambient, run-varying state.
+#:
+#: The union of the two pre-existing sweeps in this file (identity-critical at
+#: ``test_identity_critical_modules_introduce_no_randomness_or_ambient_state``,
+#: calendar at ``test_calendar_modules_do_not_import_ambient_state_machinery``),
+#: because replay has no reason to be laxer than either and every reason to be
+#: stricter: it is the layer that decides *when* a consumer learns something.
+#:
+#: ``os`` is banned here although the catalog legitimately needs it for
+#: ``os.replace``. Replay is read-only — it publishes nothing — so it has no such
+#: need, and taking one would be the change worth failing the build over.
+REPLAY_FORBIDDEN_IMPORTS = frozenset({"random", "uuid", "secrets", "time", "locale", "os"})
+
+#: Calls that read a clock or pause. A superset of the two lists already in this
+#: file: the earlier ones omitted ``time.time`` and its relatives entirely, so
+#: ``import time`` plus ``time.time()`` passed every guard while the identical
+#: code in ``domain/dataset_identity.py`` failed the build.
+WALL_CLOCK_CALLS = frozenset(
+    {
+        "now",
+        "today",
+        "utcnow",
+        "utcfromtimestamp",
+        "fromtimestamp",
+        "monotonic",
+        "monotonic_ns",
+        "perf_counter",
+        "perf_counter_ns",
+        "process_time",
+        "sleep",
+        "time",
+        "time_ns",
+        "localtime",
+        "gmtime",
+        "mktime",
+    }
+)
+
+
+def test_the_replay_ban_is_no_weaker_than_the_bans_that_predate_it() -> None:
+    """A canary against the guard itself regressing.
+
+    The first version of this sweep silently dropped ``time``, ``locale``, and
+    ``os`` from the denylist that the identity and calendar sweeps already
+    applied — so the modules that actually produce the timeline were held to a
+    *lower* standard than the ones that hash it. Pinning the relationship means a
+    future edit cannot quietly reopen that gap.
+    """
+    identity_ban = {"random", "uuid", "secrets", "locale", "time"}
+    calendar_ban = {"random", "uuid", "os", "locale", "time"}
+
+    assert REPLAY_FORBIDDEN_IMPORTS >= identity_ban
+    assert REPLAY_FORBIDDEN_IMPORTS >= calendar_ban
+    assert WALL_CLOCK_CALLS >= {"now", "today", "utcnow", "fromtimestamp", "monotonic"}
+    assert "time" in WALL_CLOCK_CALLS
+
+
+def test_replay_introduces_no_randomness_or_ambient_state() -> None:
+    for module, imported in [*_modules_under(REPLAY), *_modules_under(DOMAIN_REPLAY)]:
+        roots = {name.split(".")[0] for name in imported}
+        offenders = roots & REPLAY_FORBIDDEN_IMPORTS
+        assert offenders == set(), f"{module} imports {sorted(offenders)}"
+
+
+def test_replay_never_reads_the_wall_clock_or_sleeps() -> None:
+    """An AST scan, not a substring grep.
+
+    Phase 2.4 found that a text probe matched the modules' own docstrings
+    *documenting the absence* of the thing being probed, and reported four
+    defects that did not exist. A detector that cannot tell code from a comment
+    denying that code will eventually hide a real one, so this reads call nodes.
+    """
+    banned = WALL_CLOCK_CALLS
+    covered = {module for module, _ in [*_modules_under(REPLAY), *_modules_under(DOMAIN_REPLAY)]}
+    for path in sorted(PACKAGE_ROOT.rglob("*.py")):
+        module = _module_name(path)
+        if module not in covered:
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            if isinstance(node.func, ast.Attribute):
+                assert node.func.attr not in banned, (
+                    f"{module} calls .{node.func.attr}() at line {node.lineno}; replay time "
+                    f"is the frame's availability time and never the machine's"
+                )
+            if isinstance(node.func, ast.Name):
+                assert node.func.id not in banned, (
+                    f"{module} calls {node.func.id}() at line {node.lineno}"
+                )
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "import datetime\nx = datetime.datetime.now()\n",
+        "import time\nx = time.time()\n",
+        "import time\nx = time.monotonic()\n",
+        "import time\ntime.sleep(1)\n",
+        "import datetime\nx = datetime.date.today()\n",
+    ],
+)
+def test_the_wall_clock_scan_would_actually_catch_a_violation(source: str) -> None:
+    """A canary for the detector itself, not for the code it guards.
+
+    ``time.time()`` is in this list because the first version of this scan missed
+    it. The banned-call set was copied from the older sweeps, which never listed
+    ``time`` — so ``import time`` followed by ``time.time()`` passed every guard
+    the phase added, in the two modules that actually produce the timeline.
+    """
+    tree = ast.parse(source)
+    offenders = {
+        node.func.attr
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+    }
+    assert offenders & WALL_CLOCK_CALLS, f"the scan would not catch: {source!r}"
+
+
+@pytest.mark.parametrize("module", sorted(EXPECTED_REPLAY_API))
+def test_the_replay_public_surface_is_exactly_what_was_reviewed(module: str) -> None:
+    assert _public_module_names(module) == EXPECTED_REPLAY_API[module]
+
+
+@pytest.mark.parametrize("module", sorted(EXPECTED_REPLAY_API))
+def test_no_public_replay_name_expresses_a_deliberately_excluded_concept(module: str) -> None:
+    offenders = [
+        name
+        for name in _public_module_names(module)
+        for concept in FORBIDDEN_REPLAY_CONCEPTS
+        if concept in name.lower()
+    ]
+    assert offenders == [], f"{module} exposes an out-of-phase concept: {offenders}"
+
+
+def test_the_replay_namespace_exposes_no_clock_seek_or_selection_entry_point() -> None:
+    """The package surface a caller actually reaches for."""
+    from quant_research_terminal import replay
+
+    offenders = [
+        name
+        for name in replay.__all__
+        for concept in FORBIDDEN_REPLAY_CONCEPTS
+        if concept in name.lower()
+    ]
+    assert offenders == [], f"an excluded entry point appeared: {offenders}"
+
+
+def test_the_replay_namespace_exports_exactly_what_it_defines() -> None:
+    """``__all__`` cannot drift from the modules it re-exports."""
+    from quant_research_terminal import replay
+
+    defined = set().union(*EXPECTED_REPLAY_API.values())
+    assert set(replay.__all__) == defined
+    assert list(replay.__all__) == sorted(replay.__all__)
+
+
+def test_the_prepared_replay_offers_no_reset_seek_or_clock_method() -> None:
+    from quant_research_terminal.replay import PreparedReplay
+
+    surface = {name for name in dir(PreparedReplay) if not name.startswith("_")}
+    assert surface == {"config", "frames"}
+
+
+def test_the_schema_version_was_not_bumped_for_replay() -> None:
+    """Replay consumes canonical artifacts; it required no new persisted field."""
+    from quant_research_terminal.data.contracts import (
+        SCHEMA_VERSION,
+        SUPPORTED_SCHEMA_VERSIONS,
+    )
+
+    assert SCHEMA_VERSION == 3
+    assert SUPPORTED_SCHEMA_VERSIONS == frozenset({2, 3})
+
+
+def test_replay_contains_no_record_type_priority_table() -> None:
+    """An adversarial check for the shape a fake causal order would take.
+
+    A mapping from record type to a rank — however it is spelled — would be a
+    fabricated exchange sequence. The frame key is built from a manifest digest
+    and an ordinal precisely so that no such table has anywhere to live.
+    """
+    for path in sorted(PACKAGE_ROOT.rglob("*.py")):
+        if _module_name(path) not in {*REPLAY_MODULES, DOMAIN_REPLAY}:
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Dict):
+                continue
+            keyed = [
+                key.attr
+                for key in node.keys
+                if isinstance(key, ast.Attribute)
+                and isinstance(key.value, ast.Name)
+                and key.value.id == "RecordType"
+            ]
+            assert not keyed, f"{_module_name(path)} keys a mapping by RecordType at {node.lineno}"
